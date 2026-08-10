@@ -24,14 +24,29 @@ const realSpawner: Spawner = {
   },
 }
 
-function esc(s: string): string { return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"') }
+/** AppleScript string literal: backslash first, then double quote. */
+function escAppleScript(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+}
+
+/**
+ * PowerShell SINGLE-quoted string literal. Single quotes suppress both
+ * $(...) subexpression expansion and $variable interpolation, and backslash
+ * is not an escape character, so doubling the quote is the whole contract.
+ */
+function escPowerShell(s: string): string {
+  return s.replace(/'/g, "''")
+}
 
 export function notifyCommand(
   platform: NodeJS.Platform, title: string, body: string,
 ): { cmd: string; args: string[] } | null {
   switch (platform) {
     case 'darwin':
-      return { cmd: 'osascript', args: ['-e', `display notification "${esc(body)}" with title "${esc(title)}"`] }
+      return {
+        cmd: 'osascript',
+        args: ['-e', `display notification "${escAppleScript(body)}" with title "${escAppleScript(title)}"`],
+      }
     case 'linux':
       return { cmd: 'notify-send', args: ['-a', 'Nudge', title, body] }
     case 'win32':
@@ -41,7 +56,7 @@ export function notifyCommand(
           `[reflection.assembly]::LoadWithPartialName('System.Windows.Forms')>$null;` +
           `$n=New-Object System.Windows.Forms.NotifyIcon;` +
           `$n.Icon=[System.Drawing.SystemIcons]::Information;$n.Visible=$true;` +
-          `$n.ShowBalloonTip(10000,"${esc(title)}","${esc(body)}",'Info');Start-Sleep -s 6`],
+          `$n.ShowBalloonTip(10000,'${escPowerShell(title)}','${escPowerShell(body)}','Info');Start-Sleep -s 6`],
       }
     default:
       return null
@@ -56,7 +71,7 @@ export function soundCommand(
     case 'linux':  return { cmd: 'paplay', args: [file] }
     case 'win32':  return {
       cmd: 'powershell',
-      args: ['-NoProfile', '-Command', `(New-Object Media.SoundPlayer "${file}").PlaySync()`],
+      args: ['-NoProfile', '-Command', `(New-Object Media.SoundPlayer '${escPowerShell(file)}').PlaySync()`],
     }
     default: return null
   }
@@ -75,7 +90,7 @@ export class DesktopNotifier {
 
   alert(s: SessionState, tier: Tier): void {
     const title = `${s.project} needs you`
-    const body = s.message ?? TIER_TEXT[tier]
+    const body = s.message || TIER_TEXT[tier]
 
     const n = notifyCommand(this.platform, title, body)
     if (n) this.spawner.run(n.cmd, n.args)
