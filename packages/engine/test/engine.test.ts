@@ -8,6 +8,7 @@ import { SessionStore } from '../src/state.js'
 import { Escalator } from '../src/escalation.js'
 import { Dispatcher } from '../src/dispatch.js'
 import { Watchdog } from '../src/watchdog.js'
+import { EngineServer } from '../src/server.js'
 import { Db } from '../src/db.js'
 import { mergeConfig } from '@nudge/shared/config'
 import type { HookName, NudgeEvent } from '@nudge/shared/types'
@@ -166,5 +167,99 @@ describe('end-to-end within the engine', () => {
   it('drops an unrecognised payload without throwing', () => {
     build()
     expect(() => engine.handle({ ...ev('Stop'), hook: 'SubagentStop' as never })).not.toThrow()
+  })
+})
+
+describe('shutdown and suppression against an in-flight ladder', () => {
+  it('stop() cancels every timer, closes the server, and releases the socket', async () => {
+    // A real EngineServer and a real Watchdog, not the { broadcast/listen/close: vi.fn() }
+    // stub build() uses elsewhere — stop() cleanliness is specifically about
+    // the server's socket and the watchdog's own recurring timer, neither of
+    // which the mock exercises.
+    const cfg = mergeConfig({ channel: { id: 'test', options: {} } }) as NudgeConfig
+    clock = new FakeClock(0); db = new Db(join(dir, 'stop.db')); local = []; phone = []
+    const store = new SessionStore(cfg, clock)
+    const dispatcher = new Dispatcher(cfg, clock, async () => ({
+      id: 'test', configSchema: {}, send: async () => { phone.push('sent') },
+    }))
+    const escalator = new Escalator({
+      cfg, clock, idleMs: () => 0,
+      onLocal: (s, t) => engine.onLocal(s, t),
+      onPhone: (s, t) => { void engine.onPhone(s, t) },
+    })
+    const watchdog = new Watchdog(cfg, clock, store, t => engine.onWatchdogStall(t))
+    const server = new EngineServer({
+      onEvent: e => engine.handle(e),
+      onList: () => engine.sessions(),
+      onSnooze: (id, ms) => engine.snooze(id, ms),
+      onMute: on => engine.mute(on),
+      onResolve: id => engine.resolve(id),
+      onIdle: ms => engine.setIdle(ms),
+      onFrontmost: id => engine.setFrontmost(id),
+    })
+    engine = new Engine({
+      cfg, clock, store, db, escalator, dispatcher,
+      notifier: { alert: () => {} } as never, watchdog, server,
+    })
+
+    // EngineServer.listen(), as called from Engine.start(), takes no
+    // argument and binds shared/paths.ts's default socketPath() — redirect
+    // it into this test's temp dir the same way paths.test.ts does, so this
+    // doesn't bind a real ~/.nudge/engine.sock.
+    const originalHome = process.env.NUDGE_HOME
+    process.env.NUDGE_HOME = dir
+    try {
+      await engine.start()
+      engine.handle(ev('Notification', { message: 'Allow?' }))
+      // A genuinely in-flight ladder: the watchdog's own recurring tick plus
+      // the local-repeat and phone-poll timers the Notification just armed.
+      expect(clock.pendingCount()).toBeGreaterThan(0)
+
+      await expect(engine.stop()).resolves.toBeUndefined()
+
+      // Both the watchdog loop and every escalation timer were cancelled,
+      // not merely abandoned to fire into a torn-down engine later.
+      expect(clock.pendingCount()).toBe(0)
+
+      // Prove the socket was actually released, not just that close()
+      // resolved: a fresh server binding the same path must succeed.
+      const fresh = new EngineServer({
+        onEvent: () => {}, onList: () => [], onSnooze: vi.fn(), onMute: vi.fn(),
+        onResolve: vi.fn(), onIdle: vi.fn(), onFrontmost: vi.fn(),
+      })
+      await expect(fresh.listen()).resolves.toBeUndefined()
+      await fresh.close()
+    } finally {
+      if (originalHome === undefined) delete process.env.NUDGE_HOME
+      else process.env.NUDGE_HOME = originalHome
+    }
+  }, 3000)
+
+  it('mute(true) cancels an in-flight phone escalation, not just future ones', () => {
+    build()
+    engine.handle(ev('Notification', { message: 'Allow Bash?' }))
+    clock.advance(90_000)
+    engine.mute(true)
+    // The sharp check: right now, the phone timer isn't due until t=180_000,
+    // so if mute() only flipped cfg.muted without cancelling, it would still
+    // be sitting on the clock. Checking phone-empty after advancing past it
+    // would NOT catch that bug — phoneSuppression independently catches
+    // cfg.muted whenever the timer *did* fire, so a merely-suppressed (never
+    // cancelled) push still leaves `phone` empty. pendingCount() is the only
+    // assertion that actually distinguishes cancellation from suppression.
+    expect(clock.pendingCount()).toBe(0)
+    clock.advance(600_000)
+    expect(phone).toEqual([])
+  })
+
+  it('snooze(id, ms) cancels an in-flight phone escalation and sets snoozedUntil', () => {
+    const { store } = build()
+    engine.handle(ev('Notification', { message: 'Allow Bash?' }))
+    clock.advance(90_000)
+    engine.snooze('s1', 3_600_000)
+    expect(clock.pendingCount()).toBe(0)
+    expect(store.get('s1')!.snoozedUntil).toBe(90_000 + 3_600_000)
+    clock.advance(600_000)
+    expect(phone).toEqual([])
   })
 })
