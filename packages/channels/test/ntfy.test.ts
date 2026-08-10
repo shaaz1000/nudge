@@ -28,12 +28,22 @@ describe('ntfy send', () => {
     expect(fetchMock.mock.calls[0][0]).toBe('http://192.168.1.10:8080/t')
   })
 
-  it('sends project and tier only when detail is absent', async () => {
+  it('sends project and tier only when detail is absent — no session id, timestamp, or path anywhere in the request', async () => {
     await ntfyChannel.send(alert, { serverUrl: 'https://ntfy.sh', topic: 't' })
-    const init = fetchMock.mock.calls[0][1]
-    expect(init.headers.Title).toBe('Sales-Dashboard needs you')
+    const [url, init] = fetchMock.mock.calls[0]
+    // Assert the complete outgoing payload
+    expect(url).toBe('https://ntfy.sh/t')
+    expect(init.method).toBe('POST')
+    expect(init.headers).toEqual({
+      Title: 'Sales-Dashboard needs you',
+      Priority: 'high',
+      Tags: 'robot',
+    })
     expect(init.body).toBe('Waiting on you: permission or question')
-    expect(JSON.stringify(init)).not.toContain('/a/')
+    // Ensure no session id, timestamp, or other sensitive fields leak anywhere in the request
+    const serialised = JSON.stringify(init)
+    expect(serialised).not.toContain(alert.sessionId)
+    expect(serialised).not.toContain(String(alert.waitingSince))
   })
 
   it('includes detail when the caller supplies it', async () => {
@@ -50,7 +60,12 @@ describe('ntfy send', () => {
 
   it('sends an auth header when a token is configured', async () => {
     await ntfyChannel.send(alert, { serverUrl: 'https://ntfy.sh', topic: 't', token: 'tk_abc' })
-    expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer tk_abc')
+    expect(fetchMock.mock.calls[0][1].headers).toEqual({
+      Title: 'Sales-Dashboard needs you',
+      Priority: 'high',
+      Tags: 'robot',
+      Authorization: 'Bearer tk_abc',
+    })
   })
 
   it('throws on a non-2xx response so dispatch can retry', async () => {
