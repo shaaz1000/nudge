@@ -179,3 +179,48 @@ describe('stall marking and TTL', () => {
     expect(store.idsOlderThan(50_000)).toEqual(['s1'])
   })
 })
+
+describe('AskUserQuestion and other blocking tools', () => {
+  it('treats an AskUserQuestion PreToolUse as a blocked wait, not as activity', () => {
+    store.apply(ev('SessionStart'))
+    store.apply(ev('UserPromptSubmit'))
+    const t = store.apply(ev('PreToolUse', { tool: 'AskUserQuestion' }))
+    expect(t.started).toBe('blocked')
+    expect(t.session.status).toBe('blocked')
+    expect(t.session.waitingSince).toBe(clock.now())
+    expect(t.session.message).toMatch(/question/i)
+  })
+
+  it('treats ExitPlanMode the same way', () => {
+    const t = store.apply(ev('PreToolUse', { tool: 'ExitPlanMode' }))
+    expect(t.started).toBe('blocked')
+    expect(t.session.message).toMatch(/plan/i)
+  })
+
+  it('still treats an ordinary tool as activity that clears a wait', () => {
+    store.apply(ev('Notification', { message: 'Allow?' }))
+    const t = store.apply(ev('PreToolUse', { tool: 'Bash' }))
+    expect(t.cleared).toBe('blocked')
+    expect(t.started).toBeNull()
+    expect(t.session.status).toBe('running')
+  })
+
+  it('resolves the question wait when the user answers', () => {
+    store.apply(ev('PreToolUse', { tool: 'AskUserQuestion' }))
+    clock.advance(30_000)
+    const t = store.apply(ev('PostToolUse', { tool: 'AskUserQuestion', ts: clock.now() }))
+    expect(t.cleared).toBe('blocked')
+    expect(t.session.status).toBe('running')
+    expect(t.session.waitingSince).toBeNull()
+  })
+
+  it('does not stall a session that is blocked on a question', () => {
+    store.apply(ev('PreToolUse', { tool: 'AskUserQuestion' }))
+    expect(store.markStalled('s1')).toBeNull()
+  })
+
+  it('does not treat a PostToolUse for a blocking tool as a new wait', () => {
+    const t = store.apply(ev('PostToolUse', { tool: 'AskUserQuestion' }))
+    expect(t.started).toBeNull()
+  })
+})

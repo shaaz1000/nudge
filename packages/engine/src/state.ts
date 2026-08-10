@@ -10,6 +10,22 @@ export interface Transition {
   duplicate: boolean
 }
 
+/**
+ * Tools whose invocation means Claude is now waiting on the human.
+ *
+ * AskUserQuestion has "Permission required: No", so it never fires the
+ * Notification hook (anthropics/claude-code#59908) — without this, the
+ * multiple-choice dialog would look like ordinary tool activity and would
+ * CLEAR a pending wait instead of starting one.
+ *
+ * ExitPlanMode normally does fire Notification via the permission flow; it is
+ * listed here so an allowlisted ExitPlanMode still registers as a wait.
+ */
+const BLOCKING_TOOLS: Record<string, string> = {
+  AskUserQuestion: 'Claude is asking you a question',
+  ExitPlanMode: 'Claude is waiting for you to approve its plan',
+}
+
 export class SessionStore {
   #sessions = new Map<string, SessionState>()
 
@@ -107,8 +123,19 @@ export class SessionStore {
         this.#sessions.delete(ev.sessionId)
         break
 
+      case 'PreToolUse': {
+        const prompt = ev.tool ? BLOCKING_TOOLS[ev.tool] : undefined
+        if (prompt) {
+          s.status = 'blocked'
+          s.tier = 'blocked'
+          s.waitingSince = ev.ts
+          s.message = prompt
+          started = 'blocked'
+        }
+        break
+      }
+
       case 'SessionStart':
-      case 'PreToolUse':
       case 'PostToolUse':
         break
     }
