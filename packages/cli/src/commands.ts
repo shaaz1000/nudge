@@ -76,6 +76,28 @@ export async function cmdTest(channelId?: string): Promise<void> {
   console.log(`Sent a test alert via ${id}. Check your phone.`)
 }
 
+/**
+ * Validates and converts `nudge snooze <sessionId> [minutes]` CLI arguments.
+ *
+ * Without this, `Number(rest[1] ?? 10) * 60_000` on a typo'd minutes argument
+ * (e.g. "abc") silently becomes NaN, which JSON.stringify turns into `null`
+ * on the wire — the engine gets a nonsense snooze request and the CLI still
+ * prints "Snoozed ... for NaNm." and exits 0. Throwing here instead means
+ * the top-level handler in bin.ts prints a clear message and exits non-zero.
+ */
+export function parseSnoozeArgs(
+  sessionId: string | undefined, minutesArg: string | undefined,
+): { sessionId: string; ms: number } {
+  if (!sessionId) {
+    throw new Error('nudge snooze: a session id is required, e.g. `nudge snooze <sessionId> [minutes]`.')
+  }
+  const minutes = minutesArg === undefined ? 10 : Number(minutesArg)
+  if (!Number.isFinite(minutes) || minutes <= 0) {
+    throw new Error(`nudge snooze: minutes must be a positive number, got ${JSON.stringify(minutesArg)}.`)
+  }
+  return { sessionId, ms: minutes * 60_000 }
+}
+
 export async function cmdSnooze(sessionId: string, ms: number): Promise<void> {
   await request({ t: 'snooze', id: 1, sessionId, ms })
   console.log(`Snoozed ${sessionId} for ${Math.round(ms / 60_000)}m.`)

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { claudeSettingsPath } from '@nudge/shared/paths'
 import { applySetup, backupSettings, removeHooks } from './settings.js'
 import { serviceUnit } from './service.js'
-import { cmdList, cmdMute, cmdSnooze, cmdStart, cmdStatus, cmdTest } from './commands.js'
+import { cmdList, cmdMute, cmdSnooze, cmdStart, cmdStatus, cmdTest, parseSnoozeArgs } from './commands.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const HOOK_BIN = join(here, '..', '..', 'hook', 'dist', 'bin.js')
@@ -78,7 +78,11 @@ try {
     case 'status': await cmdStatus(); break
     case 'list':   await cmdList(); break
     case 'test':   await cmdTest(rest[0]); break
-    case 'snooze': await cmdSnooze(rest[0], Number(rest[1] ?? 10) * 60_000); break
+    case 'snooze': {
+      const { sessionId, ms } = parseSnoozeArgs(rest[0], rest[1])
+      await cmdSnooze(sessionId, ms)
+      break
+    }
     case 'mute':   await cmdMute(rest[0] !== 'off'); break
     default:
       console.log(`nudge <command>
