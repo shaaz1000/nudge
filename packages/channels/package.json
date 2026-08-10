@@ -1,0 +1,14 @@
+{
+  "name": "@nudge/channels",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/registry.js",
+  "exports": {
+    ".": "./dist/registry.js",
+    "./types": "./dist/types.js",
+    "./ntfy": "./dist/ntfy.js"
+  },
+  "engines": { "node": ">=22.5.0" },
+  "dependencies": { "@nudge/shared": "0.1.0" },
+  "scripts": { "build": "tsc --build" }
+}
