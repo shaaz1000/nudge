@@ -13,7 +13,7 @@ import { spawn } from 'node:child_process'
 import { encode } from '@nudge/shared/protocol'
 import type { HookName, NudgeEvent } from '@nudge/shared/types'
 import { readStdin } from './read-stdin.js'
-import { detectSurfaceForHook, WALK_DEADLINE_MS, type ProcessProbe } from './surface.js'
+import { detectSurfaceForHook, WALK_DEADLINE_MS } from './surface.js'
 import { sendEvent } from './send.js'
 import { spoolEvent } from './spool.js'
 
@@ -49,22 +49,6 @@ const SUBSCRIBED: readonly HookName[] = [
 const guard = setTimeout(() => process.exit(0), BUDGET_MS + 200)
 guard.unref?.()
 
-// TEST-ONLY seam, mirroring the existing NUDGE_NO_SPAWN convention: when set,
-// the SessionStart walk uses a synthetic probe that busy-waits for this many ms
-// per hop and never matches, instead of shelling out to a real `ps`/`powershell`.
-// This lets test/bin.test.ts prove the process-wide deadline holds end-to-end
-// even when every hop consumes its full configured timeout, without depending
-// on a genuinely hung `ps` to do it. Never read outside of a deliberate test.
-function slowTestProbe(delayMs: number): ProcessProbe {
-  return pid => {
-    const start = Date.now()
-    while (Date.now() - start < delayMs) { /* busy-wait: a real, slow-but-not-hung probe */ }
-    return { ppid: pid + 1, comm: 'bash' } // never matches HOST_APP_PATTERN
-  }
-}
-const testHopDelayMs = process.env.NUDGE_TEST_HOP_DELAY_MS
-const testProbe: ProcessProbe | undefined = testHopDelayMs ? slowTestProbe(Number(testHopDelayMs)) : undefined
-
 function buildEvent(raw: string): NudgeEvent | null {
   let parsed: unknown
   try { parsed = JSON.parse(raw) } catch { return null }
@@ -94,7 +78,7 @@ function buildEvent(raw: string): NudgeEvent | null {
   // shortens the walk rather than the walk adding to an already-spent budget.
   if (ev.hook === 'SessionStart') {
     const walkDeadline = Math.min(Date.now() + WALK_DEADLINE_MS, DEADLINE)
-    ev.surface = detectSurfaceForHook(ev.hook, process.env, testProbe, walkDeadline)
+    ev.surface = detectSurfaceForHook(ev.hook, process.env, undefined, walkDeadline)
   }
   return ev
 }

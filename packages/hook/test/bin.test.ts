@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createServer, type Server } from 'node:net'
-import { mkdtempSync, rmSync, readdirSync, existsSync } from 'node:fs'
+import { mkdtempSync, rmSync, readdirSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -90,20 +90,33 @@ describe('hook binary contract', () => {
     expect(existsSync(join(home, 'spool')) ? readdirSync(join(home, 'spool')) : []).toHaveLength(0)
   })
 
-  // --- Review round 1, Finding 1 ---
-  // Proves the fix end-to-end, not just at the detectHostApp unit level: a real
-  // SessionStart payload through the actual binary, with NUDGE_TEST_HOP_DELAY_MS
-  // forcing every walk hop to consume its full configured timeout (mirroring the
-  // review's "inject a probe that always consumes its full timeout" ask) rather
-  // than returning instantly like every other test's probe does. Before the fix,
-  // the three phases' allowances summed to more than the 500ms budget by
-  // construction; this test would have taken ~700-800ms internally. It should now
-  // finish close to the 500ms internal budget plus ordinary process-startup
-  // overhead.
-  it('stays within the process budget for a real SessionStart hook even when every walk hop consumes its full configured timeout', async () => {
+  // --- Review round 2, Finding 1 (retraction + replacement) ---
+  // Round 1 added a test-only "force every walk hop to sleep for N ms" environment
+  // variable to bin.ts so this test could exercise the full-timeout case end-to-end.
+  // That seam was itself a regression: its busy-wait had no reference to any
+  // deadline (unlike the real ps/powershell-backed probe, which is bounded by
+  // execFileSync's OS-enforced timeout), so a large-enough value could block the
+  // walk — and, being synchronous, block the guard's own setTimeout backstop right
+  // along with it — for as long as the caller chose. The reviewer measured over a
+  // full second of wall clock by setting it high enough. The seam and its helper
+  // function have been removed from bin.ts entirely; see task-16-report.md's round-2
+  // section for the full writeup (deliberately not naming the removed variable
+  // here, so a repo-wide search for it turns up zero remaining references).
+  //
+  // The structural timing bound (a probe that genuinely consumes its full configured
+  // timeout, on every hop, never overshoots the shared deadline) is already proven
+  // safely at the function level in surface.test.ts's "never overshoots the
+  // deadline" test — detectHostApp there is called directly, in-process, with an
+  // injected probe, so a slow/malicious probe can only ever block that one test, not
+  // every hook invocation Claude Code makes for the lifetime of the binary.
+  //
+  // What this test can honestly still demonstrate, without reintroducing that risk,
+  // is that a real, completely unmocked SessionStart invocation — hitting the actual
+  // `ps`-backed defaultProbe — comfortably clears the budget on a real machine.
+  it('completes well inside the budget for a real, unmocked SessionStart hook', async () => {
     const started = Date.now()
     const child = run('node', [BIN], {
-      env: { ...process.env, NUDGE_HOME: home, NUDGE_NO_SPAWN: '1', NUDGE_TEST_HOP_DELAY_MS: '60' },
+      env: { ...process.env, NUDGE_HOME: home, NUDGE_NO_SPAWN: '1' },
     })
     child.child!.stdin!.end(JSON.stringify({
       hook_event_name: 'SessionStart', session_id: 's1', cwd: '/a/my-repo',
@@ -112,14 +125,15 @@ describe('hook binary contract', () => {
     const elapsed = Date.now() - started
 
     expect(stdout).toBe('')
-    // Measured ~160-190ms in this environment (`node` process-startup overhead
-    // dominates; the internal walk/read/send work is a small fraction of that).
-    // 600ms leaves real margin for a slower/loaded CI machine while still being
-    // well under what the pre-fix design could reach on its own internal budget
-    // alone (~700-800ms, *before* adding process-startup time on top).
-    expect(elapsed).toBeLessThan(600)
-    // And prove the spooled event still carries a surface (the walk ran, it just
-    // didn't overshoot) rather than this passing only because nothing happened.
-    expect(readdirSync(join(home, 'spool'))).toHaveLength(1)
+    // Generous margin for `node`'s own process-startup overhead (unrelated to the
+    // hook's internal budget); a real `ps`-backed walk normally adds only single-
+    // digit-to-low-double-digit ms on top of that.
+    expect(elapsed).toBeLessThan(2000)
+    // Proves the walk actually ran (not that nothing happened): the spooled event
+    // carries a surface fingerprinted from this sandbox's real ancestor chain.
+    const files = readdirSync(join(home, 'spool'))
+    expect(files).toHaveLength(1)
+    const spooled = JSON.parse(readFileSync(join(home, 'spool', files[0]), 'utf8'))
+    expect(spooled.event.surface).toBeDefined()
   })
 })
