@@ -20,8 +20,13 @@ export class Watchdog {
     let cancelTimer: Cancel = () => {}
     const loop = () => {
       if (cancelled) return
-      this.tick()
-      cancelTimer = this.clock.schedule(this.cfg.watchdog.tickMs, loop)
+      try {
+        this.tick()
+      } catch (err) {
+        console.error('nudge watchdog: tick failed', err)
+      } finally {
+        cancelTimer = this.clock.schedule(this.cfg.watchdog.tickMs, loop)
+      }
     }
     cancelTimer = this.clock.schedule(this.cfg.watchdog.tickMs, loop)
     return () => { cancelled = true; cancelTimer() }
@@ -38,7 +43,13 @@ export class Watchdog {
       if (s.status !== 'running') continue
       if (s.lastEventAt > cutoff) continue
       const t = this.store.markStalled(s.sessionId)
-      if (t) this.onStall(t)
+      if (t) {
+        try {
+          this.onStall(t)
+        } catch (err) {
+          console.error(`nudge watchdog: onStall failed for ${t.session.sessionId}`, err)
+        }
+      }
     }
   }
 }

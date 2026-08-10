@@ -108,3 +108,61 @@ describe('start/stop', () => {
     expect(clock.pendingCount()).toBe(0)
   })
 })
+
+describe('resilience to throwing callbacks', () => {
+  it('survives a throwing onStall callback and continues ticking', () => {
+    let callCount = 0
+    const throwingCallback = (t: Transition) => {
+      callCount++
+      if (callCount === 1) throw new Error('simulated callback failure')
+      stalls.push(t)
+    }
+    const wd2 = new Watchdog(cfg, clock, store, throwingCallback)
+
+    // First session stalls and callback throws
+    store.apply(ev('SessionStart', { sessionId: 's1' }))
+    clock.advance(900_001)
+    const cancel = wd2.start()
+
+    // Let the first stall happen and throw
+    clock.advance(30_000)
+    expect(callCount).toBe(1)
+    expect(stalls).toHaveLength(0)
+
+    // Create second session that also stalls
+    store.apply(ev('SessionStart', { sessionId: 's2', ts: clock.now() }))
+    clock.advance(900_001)
+
+    // Verify second stall was detected (proves loop is still alive)
+    clock.advance(30_000)
+    expect(callCount).toBe(2)
+    expect(stalls).toHaveLength(1)
+    expect(stalls[0].session.sessionId).toBe('s2')
+
+    cancel()
+  })
+
+  it('one session throwing does not prevent another from stalling in same tick', () => {
+    let callCount = 0
+    const throwingCallback = (t: Transition) => {
+      callCount++
+      if (t.session.sessionId === 's1') throw new Error('s1 throws')
+      stalls.push(t)
+    }
+    const wd2 = new Watchdog(cfg, clock, store, throwingCallback)
+
+    // Create two sessions
+    store.apply(ev('SessionStart', { sessionId: 's1' }))
+    clock.advance(1)
+    store.apply(ev('SessionStart', { sessionId: 's2', ts: clock.now() }))
+
+    // Advance past stall threshold
+    clock.advance(900_001)
+
+    // Tick once; both should stall, s1 throws but s2 should still be recorded
+    wd2.tick()
+    expect(callCount).toBe(2)
+    expect(stalls).toHaveLength(1)
+    expect(stalls[0].session.sessionId).toBe('s2')
+  })
+})
