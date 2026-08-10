@@ -27,6 +27,11 @@ function installService(): void {
 
 function spawnEngine(): void {
   const p = spawn(process.execPath, [ENGINE_BIN], { detached: true, stdio: 'ignore' })
+  // Without this, a missing/unexecutable ENGINE_BIN surfaces as an async,
+  // unhandled 'error' event on the child — which Node rethrows as an
+  // uncaught exception, crashing the CLI well after "Engine started." has
+  // already been printed. Report it the same way installService() does.
+  p.on('error', e => console.error(`nudge: could not start the engine: ${e.message}`))
   p.unref()
 }
 
