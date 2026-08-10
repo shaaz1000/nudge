@@ -1,0 +1,9 @@
+{
+  "name": "@nudge/hook",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": { "nudge-hook": "./dist/bin.js" },
+  "engines": { "node": ">=22.5.0" },
+  "dependencies": { "@nudge/shared": "0.1.0" },
+  "scripts": { "build": "tsc --build" }
+}

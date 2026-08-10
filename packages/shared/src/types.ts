@@ -20,6 +20,8 @@ export interface Surface {
   tmux?: boolean
   wtSession?: string
   ppid?: number
+  /** Host application identified by walking the parent-process chain (SessionStart only). */
+  app?: { name: string; path?: string; pid?: number }
 }
 
 /** A normalized event produced by an event source. */
