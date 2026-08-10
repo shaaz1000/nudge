@@ -158,3 +158,86 @@ describe('cancellation', () => {
     expect(phone).toHaveLength(2)
   })
 })
+
+describe('phone escalation cadence (regime-flip precision)', () => {
+  it('fires at the exact regime-flip instant, not the next poll boundary (walk away at t=100000)', () => {
+    // idleMs(t) = max(0, t - 100_000): active until t=100_000, then idle grows
+    // in lockstep with elapsed time. The threshold (60_000) is crossed at
+    // t=160_000, and elapsed(160_000)=160_000 already exceeds the idle-path
+    // delay (45_000) that applies from that instant — so 160_000 is the one
+    // analytically correct fire instant. A blind fixed-cadence poll (every
+    // 45_000 from t=0) would instead land on t=180_000, the same instant the
+    // original begin-time-only bug produced — i.e. no improvement at all.
+    clock = new FakeClock(0)
+    local = []; phone = []
+    const e = new Escalator({
+      cfg: DEFAULT_CONFIG, clock,
+      idleMs: () => Math.max(0, clock.now() - 100_000),
+      onLocal: (_s, tier, repeat) => local.push({ tier, repeat }),
+      onPhone: (_s, tier, repeat) => phone.push({ tier, repeat }),
+    })
+    e.begin(session(), 'blocked')
+    clock.advance(159_999); expect(phone).toHaveLength(0)
+    clock.advance(1); expect(phone).toHaveLength(1)
+  })
+
+  it('fires at the exact regime-flip instant for a different walk-away alignment (t=30000)', () => {
+    // idleMs(t) = max(0, t - 30_000). The threshold is crossed at t=90_000,
+    // and elapsed(90_000)=90_000 already exceeds the idle-path delay
+    // (45_000) — so 90_000 is the correct fire instant for this alignment.
+    clock = new FakeClock(0)
+    local = []; phone = []
+    const e = new Escalator({
+      cfg: DEFAULT_CONFIG, clock,
+      idleMs: () => Math.max(0, clock.now() - 30_000),
+      onLocal: (_s, tier, repeat) => local.push({ tier, repeat }),
+      onPhone: (_s, tier, repeat) => phone.push({ tier, repeat }),
+    })
+    e.begin(session(), 'blocked')
+    clock.advance(89_999); expect(phone).toHaveLength(0)
+    clock.advance(1); expect(phone).toHaveLength(1)
+  })
+
+  it('does not spin when idleDelayMs is configured to 0', () => {
+    // Regression test for the zero-delay hazard: before the fix, capping the
+    // poll gap at cfg.escalation.idleDelayMs with no floor meant idleDelayMs:
+    // 0 produced a same-instant reschedule loop that never let clock.now()
+    // advance, hanging FakeClock.advance() with no timeout (empirically this
+    // ran the FakeClock task list unbounded and OOM-killed the process
+    // rather than looping silently forever).
+    const cfg = mergeConfig({ escalation: { idleDelayMs: 0 } })
+    const e = build(cfg as NudgeConfig, 0)
+    e.begin(session(), 'blocked')
+    clock.advance(200_000)
+    expect(phone).toHaveLength(1)
+  })
+
+  it('a per-tier override schedules a single exact timer, never re-polling en route', () => {
+    // pendingCount() alone can't distinguish "one exact timer" from "one hop
+    // of a chunked poll chain" — both designs only ever have one phone-related
+    // task pending at a time. Counting idleMs() reads does distinguish them:
+    // the override path reads idle exactly twice (once synchronously at
+    // begin(), once at the single scheduled fire), whereas a poll chain
+    // capped at idleDelayMs (45_000) would read idle once per hop en route to
+    // the 200_000ms override delay.
+    const cfg = mergeConfig({ tiers: { blocked: { escalateDelayMs: 200_000 } } })
+    clock = new FakeClock(0)
+    local = []; phone = []
+    let idleMsCalls = 0
+    const e = new Escalator({
+      cfg: cfg as NudgeConfig, clock,
+      idleMs: () => { idleMsCalls++; return 0 },
+      onLocal: (_s, tier, repeat) => local.push({ tier, repeat }),
+      onPhone: (_s, tier, repeat) => phone.push({ tier, repeat }),
+    })
+    e.begin(session(), 'blocked')
+    expect(idleMsCalls).toBe(1)
+    clock.advance(199_999)
+    expect(phone).toHaveLength(0)
+    expect(idleMsCalls).toBe(1)
+    clock.advance(1)
+    expect(phone).toEqual([{ tier: 'blocked', repeat: 0 }])
+    expect(idleMsCalls).toBe(2)
+    expect(clock.pendingCount()).toBe(0)
+  })
+})

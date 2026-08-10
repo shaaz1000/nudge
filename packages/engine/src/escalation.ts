@@ -44,12 +44,13 @@ export class Escalator {
 
     // Phone escalation. The required delay is idle-adaptive, and idle state
     // can change at any moment during the wait — so we can't compute it once
-    // at begin() and arm a single timer for it. Instead we poll: every
-    // `idleDelayMs` (or sooner, if less time remains), re-read idleMs() and
-    // recompute the delay the *current* idle state demands, firing as soon
-    // as the elapsed wait satisfies it. This guarantees the idle reading
-    // that actually decides the push is taken at (near) fire time, not at
-    // begin time, so a human who walks away mid-wait gets the faster path.
+    // at begin() and arm a single timer for it. Instead we poll, but not at
+    // a blind fixed cadence: idleMs() advances at most 1ms per elapsed ms, so
+    // if the machine is currently active the idle threshold cannot be
+    // crossed before `idleThresholdMs - idle` from now, and checking at
+    // exactly that instant is both precise and cheap. A per-tier delay
+    // override makes the required delay a constant for the whole wait —
+    // idle state is irrelevant then, so a single exact timer suffices.
     const beginAt = clock.now()
 
     const firePhone = () => {
@@ -61,14 +62,40 @@ export class Escalator {
     }
 
     const pollPhone = () => {
-      const required = escalateDelayFor(cfg, tier, d.idleMs())
+      const idle = d.idleMs()
+      const required = escalateDelayFor(cfg, tier, idle)
       if (required === null) return
-      const remaining = required - (clock.now() - beginAt)
+      const elapsed = clock.now() - beginAt
+      const remaining = required - elapsed
       if (remaining <= 0) {
         firePhone()
         return
       }
-      const nextCheckIn = Math.min(remaining, cfg.escalation.idleDelayMs)
+
+      // idleMs advances at most 1ms per ms, so the active->idle regime
+      // cannot flip before this. Once already idle, required cannot shrink
+      // further.
+      const untilRegimeFlip = idle >= cfg.escalation.idleThresholdMs
+        ? Infinity
+        : cfg.escalation.idleThresholdMs - idle
+
+      // A per-tier override makes required a constant for the whole wait,
+      // so idle state is irrelevant and a single timer is exact.
+      const hasOverride = cfg.tiers[tier].escalateDelayMs !== undefined
+
+      // untilRegimeFlip assumes idleMs() only grows with real elapsed time.
+      // A caller whose idleMs() can jump between calls without an
+      // intervening tick (a stubbed clock, a system clock adjustment, a
+      // suspend/resume) could still cross the threshold before that
+      // horizon. idleDelayMs is the shortest delay this config can ever
+      // require, so capping the gap between checks at idleDelayMs bounds
+      // how long such a jump can go unnoticed, without changing the fire
+      // instant for a well-behaved (monotonic) idleMs. Math.max(1, ...) is
+      // what keeps this delay strictly positive regardless of any
+      // zero-valued config (closes the zero-delay spin either way).
+      const nextCheckIn = hasOverride
+        ? remaining
+        : Math.max(1, Math.min(remaining, untilRegimeFlip, cfg.escalation.idleDelayMs))
       this.#track(s.sessionId, clock.schedule(nextCheckIn, pollPhone))
     }
     pollPhone()
