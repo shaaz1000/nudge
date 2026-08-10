@@ -5889,6 +5889,149 @@ git commit -m "feat(engine): detect sleep and clock changes, re-arm waiting sess
 
 ---
 
+## Task 22: Detect `AskUserQuestion` as a blocking wait
+
+> **Added 2026-08-10 during execution, after Task 6 shipped.** Not part of the original plan.
+
+**Files:**
+- Modify: `packages/engine/src/state.ts` — `apply()`'s `PreToolUse` case
+- Test: `packages/engine/test/state.test.ts` — append a new describe block
+
+**Interfaces:**
+- Consumes: unchanged. `NudgeEvent.tool` already carries the tool name from Task 5's normalizer.
+- Produces: no signature change. `apply()` gains one behaviour: a `PreToolUse` for a blocking tool now returns `started: 'blocked'` instead of `started: null`.
+
+### Why this exists
+
+The plan assumed the `Notification` hook covers every case where Claude waits on a human. It does not. Verified against the current hooks reference and anthropics/claude-code#59908 (closed `not_planned`): **`AskUserQuestion` — the multiple-choice dialog — never fires `Notification`.** It has "Permission required: No", so it never enters the permission flow, and at the hook layer Claude appears to be waiting on a tool result rather than on the user.
+
+This is not a cosmetic gap. `AskUserQuestion` is one of the three cases the product exists to catch. Worse, the plan's design makes it actively wrong: `PreToolUse` is treated as an *activity* signal that CLEARS a pending wait, so Claude asking a multiple-choice question currently cancels an alert instead of raising one.
+
+`ExitPlanMode` is included alongside it as belt-and-braces. It normally fires `Notification` because it does require permission — but a user who allowlists it would get no `Notification`, while the plan-approval dialog still blocks. Detecting it here closes that hole at no cost.
+
+`PostToolUse` fires only after the user answers, so the governing rule resolves these waits for free — no special-case teardown needed.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `packages/engine/test/state.test.ts`:
+
+```ts
+describe('AskUserQuestion and other blocking tools', () => {
+  it('treats an AskUserQuestion PreToolUse as a blocked wait, not as activity', () => {
+    store.apply(ev('SessionStart'))
+    store.apply(ev('UserPromptSubmit'))
+    const t = store.apply(ev('PreToolUse', { tool: 'AskUserQuestion' }))
+    expect(t.started).toBe('blocked')
+    expect(t.session.status).toBe('blocked')
+    expect(t.session.waitingSince).toBe(clock.now())
+    expect(t.session.message).toMatch(/question/i)
+  })
+
+  it('treats ExitPlanMode the same way', () => {
+    const t = store.apply(ev('PreToolUse', { tool: 'ExitPlanMode' }))
+    expect(t.started).toBe('blocked')
+    expect(t.session.message).toMatch(/plan/i)
+  })
+
+  it('still treats an ordinary tool as activity that clears a wait', () => {
+    store.apply(ev('Notification', { message: 'Allow?' }))
+    const t = store.apply(ev('PreToolUse', { tool: 'Bash' }))
+    expect(t.cleared).toBe('blocked')
+    expect(t.started).toBeNull()
+    expect(t.session.status).toBe('running')
+  })
+
+  it('resolves the question wait when the user answers', () => {
+    store.apply(ev('PreToolUse', { tool: 'AskUserQuestion' }))
+    clock.advance(30_000)
+    const t = store.apply(ev('PostToolUse', { tool: 'AskUserQuestion', ts: clock.now() }))
+    expect(t.cleared).toBe('blocked')
+    expect(t.session.status).toBe('running')
+    expect(t.session.waitingSince).toBeNull()
+  })
+
+  it('does not stall a session that is blocked on a question', () => {
+    store.apply(ev('PreToolUse', { tool: 'AskUserQuestion' }))
+    expect(store.markStalled('s1')).toBeNull()
+  })
+
+  it('does not treat a PostToolUse for a blocking tool as a new wait', () => {
+    const t = store.apply(ev('PostToolUse', { tool: 'AskUserQuestion' }))
+    expect(t.started).toBeNull()
+  })
+})
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `npx vitest run packages/engine/test/state.test.ts`
+Expected: the first, second, fourth and sixth tests fail — `started` is `null` because `PreToolUse` currently falls through to the no-op branch. The third and fifth already pass.
+
+- [ ] **Step 3: Implement**
+
+In `packages/engine/src/state.ts`, add above the class:
+
+```ts
+/**
+ * Tools whose invocation means Claude is now waiting on the human.
+ *
+ * AskUserQuestion has "Permission required: No", so it never fires the
+ * Notification hook (anthropics/claude-code#59908) — without this, the
+ * multiple-choice dialog would look like ordinary tool activity and would
+ * CLEAR a pending wait instead of starting one.
+ *
+ * ExitPlanMode normally does fire Notification via the permission flow; it is
+ * listed here so an allowlisted ExitPlanMode still registers as a wait.
+ */
+const BLOCKING_TOOLS: Record<string, string> = {
+  AskUserQuestion: 'Claude is asking you a question',
+  ExitPlanMode: 'Claude is waiting for you to approve its plan',
+}
+```
+
+Then replace the `PreToolUse` arm of the switch in `apply()`. It currently shares a no-op branch with `SessionStart` and `PostToolUse`:
+
+```ts
+      case 'PreToolUse': {
+        const prompt = ev.tool ? BLOCKING_TOOLS[ev.tool] : undefined
+        if (prompt) {
+          s.status = 'blocked'
+          s.tier = 'blocked'
+          s.waitingSince = ev.ts
+          s.message = prompt
+          started = 'blocked'
+        }
+        break
+      }
+
+      case 'SessionStart':
+      case 'PostToolUse':
+        break
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `npx vitest run packages/engine/test/state.test.ts`
+Expected: PASS, 26 tests
+
+Then the full suite and build:
+
+Run: `npx vitest run && npx tsc --build`
+Expected: all green
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/engine/src/state.ts packages/engine/test/state.test.ts
+git commit -m "fix(engine): treat AskUserQuestion and ExitPlanMode as blocking waits
+
+AskUserQuestion never fires the Notification hook (claude-code#59908), so the
+multiple-choice dialog was being read as ordinary tool activity and CLEARED a
+pending wait instead of raising one."
+```
+
+---
+
 ## Phase 1 done
 
 At this point you have working software: a real Claude Code permission prompt produces a sound and a desktop notification immediately, and a phone push if you don't come back — with everything cancelling the moment you respond.
