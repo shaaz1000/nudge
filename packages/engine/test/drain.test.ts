@@ -33,11 +33,14 @@ describe('drainSpool', () => {
   })
 
   it('replays in timestamp order so the state machine sees a coherent sequence', async () => {
-    writeFileSync(join(dir, '9-late.json'), spooled('late', 9000))
-    writeFileSync(join(dir, '1-early.json'), spooled('early', 1000))
+    // Filenames sort opposite to timestamps: readdir will give [a, m, z] but
+    // ts order is [z, m, a]. If sort() is missing, the test fails.
+    writeFileSync(join(dir, 'a-newest.json'), spooled('newest', 9000))
+    writeFileSync(join(dir, 'm-middle.json'), spooled('middle', 5000))
+    writeFileSync(join(dir, 'z-oldest.json'), spooled('oldest', 1000))
     const seen: NudgeEvent[] = []
     await drainSpool(ev => seen.push(ev), dir)
-    expect(seen.map(e => e.sessionId)).toEqual(['early', 'late'])
+    expect(seen.map(e => e.sessionId)).toEqual(['oldest', 'middle', 'newest'])
   })
 
   it('discards a malformed spool file instead of stalling the drain', async () => {
