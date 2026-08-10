@@ -31,7 +31,7 @@ export interface NudgeConfig {
   projects: Record<string, { muted?: boolean }>
 }
 
-export const DEFAULT_CONFIG: NudgeConfig = {
+export const DEFAULT_CONFIG: NudgeConfig = deepFreeze({
   detailLevel: 'minimal',
   muted: false,
   escalation: {
@@ -55,7 +55,7 @@ export const DEFAULT_CONFIG: NudgeConfig = {
   channel: null,
   retentionDays: 30,
   projects: {},
-}
+} as NudgeConfig)
 
 const TIERS: Tier[] = ['blocked', 'idle-long', 'idle-short', 'stalled']
 
@@ -68,6 +68,16 @@ function requireNonNegative(v: unknown, name: string): number {
     throw new Error(`config: ${name} must be a non-negative number, got ${JSON.stringify(v)}`)
   }
   return v
+}
+
+function deepFreeze<T extends object>(obj: T): T {
+  Object.freeze(obj)
+  for (const value of Object.values(obj)) {
+    if (typeof value === 'object' && value !== null && !Object.isFrozen(value)) {
+      deepFreeze(value)
+    }
+  }
+  return obj
 }
 
 export function mergeConfig(partial: unknown): NudgeConfig {
@@ -89,30 +99,44 @@ export function mergeConfig(partial: unknown): NudgeConfig {
     cfg.muted = partial.muted
   }
 
-  if (isObj(partial.escalation)) {
+  if ('escalation' in partial) {
+    if (!isObj(partial.escalation)) {
+      throw new Error(`config: escalation must be an object, got ${JSON.stringify(partial.escalation)}`)
+    }
     for (const [k, v] of Object.entries(partial.escalation)) {
       if (!(k in cfg.escalation)) throw new Error(`config: unknown escalation key "${k}"`)
       ;(cfg.escalation as Record<string, number>)[k] = requireNonNegative(v, `escalation.${k}`)
     }
   }
 
-  if (isObj(partial.watchdog)) {
+  if ('watchdog' in partial) {
+    if (!isObj(partial.watchdog)) {
+      throw new Error(`config: watchdog must be an object, got ${JSON.stringify(partial.watchdog)}`)
+    }
     for (const [k, v] of Object.entries(partial.watchdog)) {
       if (!(k in cfg.watchdog)) throw new Error(`config: unknown watchdog key "${k}"`)
       ;(cfg.watchdog as Record<string, number>)[k] = requireNonNegative(v, `watchdog.${k}`)
     }
   }
 
-  if (partial.quietHours === null) cfg.quietHours = null
-  else if (isObj(partial.quietHours)) {
-    const { start, end } = partial.quietHours
-    const re = /^([01]\d|2[0-3]):[0-5]\d$/
-    if (typeof start !== 'string' || !re.test(start)) throw new Error('config: quietHours.start must be "HH:MM"')
-    if (typeof end !== 'string' || !re.test(end)) throw new Error('config: quietHours.end must be "HH:MM"')
-    cfg.quietHours = { start, end }
+  if ('quietHours' in partial) {
+    if (partial.quietHours === null) {
+      cfg.quietHours = null
+    } else if (isObj(partial.quietHours)) {
+      const { start, end } = partial.quietHours
+      const re = /^([01]\d|2[0-3]):[0-5]\d$/
+      if (typeof start !== 'string' || !re.test(start)) throw new Error('config: quietHours.start must be "HH:MM"')
+      if (typeof end !== 'string' || !re.test(end)) throw new Error('config: quietHours.end must be "HH:MM"')
+      cfg.quietHours = { start, end }
+    } else {
+      throw new Error(`config: quietHours must be null or an object, got ${JSON.stringify(partial.quietHours)}`)
+    }
   }
 
-  if (isObj(partial.tiers)) {
+  if ('tiers' in partial) {
+    if (!isObj(partial.tiers)) {
+      throw new Error(`config: tiers must be an object, got ${JSON.stringify(partial.tiers)}`)
+    }
     for (const [name, raw] of Object.entries(partial.tiers)) {
       if (!TIERS.includes(name as Tier)) throw new Error(`config: unknown tier "${name}"`)
       if (!isObj(raw)) throw new Error(`config: tiers.${name} must be an object`)
@@ -137,14 +161,19 @@ export function mergeConfig(partial: unknown): NudgeConfig {
     }
   }
 
-  if (partial.channel === null) cfg.channel = null
-  else if (isObj(partial.channel)) {
-    if (typeof partial.channel.id !== 'string' || partial.channel.id.length === 0) {
-      throw new Error('config: channel.id must be a non-empty string')
-    }
-    cfg.channel = {
-      id: partial.channel.id,
-      options: isObj(partial.channel.options) ? partial.channel.options : {},
+  if ('channel' in partial) {
+    if (partial.channel === null) {
+      cfg.channel = null
+    } else if (isObj(partial.channel)) {
+      if (typeof partial.channel.id !== 'string' || partial.channel.id.length === 0) {
+        throw new Error('config: channel.id must be a non-empty string')
+      }
+      cfg.channel = {
+        id: partial.channel.id,
+        options: isObj(partial.channel.options) ? partial.channel.options : {},
+      }
+    } else {
+      throw new Error(`config: channel must be null or an object, got ${JSON.stringify(partial.channel)}`)
     }
   }
 
@@ -152,10 +181,20 @@ export function mergeConfig(partial: unknown): NudgeConfig {
     cfg.retentionDays = requireNonNegative(partial.retentionDays, 'retentionDays')
   }
 
-  if (isObj(partial.projects)) {
+  if ('projects' in partial) {
+    if (!isObj(partial.projects)) {
+      throw new Error(`config: projects must be an object, got ${JSON.stringify(partial.projects)}`)
+    }
     for (const [k, v] of Object.entries(partial.projects)) {
       if (!isObj(v)) throw new Error(`config: projects["${k}"] must be an object`)
-      cfg.projects[k] = { muted: v.muted === true }
+      if ('muted' in v) {
+        if (typeof v.muted !== 'boolean') {
+          throw new Error(`config: projects["${k}"].muted must be a boolean, got ${JSON.stringify(v.muted)}`)
+        }
+        cfg.projects[k] = { muted: v.muted }
+      } else {
+        cfg.projects[k] = { muted: false }
+      }
     }
   }
 
