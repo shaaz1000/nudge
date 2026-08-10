@@ -17,6 +17,11 @@ export interface ServerHandlers {
 
 export class EngineServer {
   #server: Server | null = null
+  // Every accepted connection, subscribed or not — close() must be able to
+  // tear all of them down, or a lingering non-subscribing client (a GUI that
+  // connected and sent `list` but never disappeared) hangs shutdown forever.
+  #sockets = new Set<Socket>()
+  // Subset of #sockets that opted into `subscribe` — the only ones broadcast() writes to.
   #subscribers = new Set<Socket>()
 
   constructor(private h: ServerHandlers) {}
@@ -25,7 +30,11 @@ export class EngineServer {
     if (process.platform !== 'win32') {
       mkdirSync(dirname(path), { recursive: true })
       // A crashed engine leaves the socket file behind; unlink before binding.
-      try { unlinkSync(path) } catch { /* not present */ }
+      try {
+        unlinkSync(path)
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+      }
     }
 
     const server = createServer(sock => this.#attach(sock))
@@ -39,14 +48,22 @@ export class EngineServer {
       })
     })
 
+    // The listener above only covers startup failures and is removed once
+    // listen() succeeds. Without a durable replacement, a Server with zero
+    // 'error' listeners crashes the whole process on the next EMFILE/etc.
+    // during accept() — the component whose job is to notice problems must
+    // not itself die quietly. This is a background daemon, so stderr is its log.
+    server.on('error', err => { console.error('nudge server: error', err) })
+
     if (process.platform !== 'win32') chmodSync(path, 0o600)
   }
 
   #attach(sock: Socket): void {
     const dec = new NdjsonDecoder()
+    this.#sockets.add(sock)
     sock.setEncoding('utf8')
-    sock.on('error', () => { this.#subscribers.delete(sock) })
-    sock.on('close', () => { this.#subscribers.delete(sock) })
+    sock.on('error', () => { this.#sockets.delete(sock); this.#subscribers.delete(sock) })
+    sock.on('close', () => { this.#sockets.delete(sock); this.#subscribers.delete(sock) })
     sock.on('data', chunk => {
       for (const raw of dec.push(chunk as unknown as string)) {
         this.#handle(sock, raw as ClientMessage)
@@ -55,6 +72,9 @@ export class EngineServer {
   }
 
   #reply(sock: Socket, msg: unknown): void {
+    // Belt-and-braces: Socket#write() on a destroyed socket returns false
+    // rather than throwing, so this catch rarely fires. The real eviction
+    // path is the close/error listeners registered in #attach.
     try { sock.write(encode(msg)) } catch { /* peer vanished */ }
   }
 
@@ -93,12 +113,19 @@ export class EngineServer {
   broadcast(sessions: SessionState[]): void {
     const payload = encode({ t: 'state', sessions })
     for (const sock of this.#subscribers) {
+      // Belt-and-braces here too: write() on a destroyed socket returns
+      // false rather than throwing. Real eviction happens via #attach's
+      // close/error listeners; this catch only guards a synchronous throw.
       try { sock.write(payload) } catch { this.#subscribers.delete(sock) }
     }
   }
 
   async close(): Promise<void> {
-    for (const s of this.#subscribers) s.destroy()
+    // Destroy every accepted connection, not just subscribers — net.Server's
+    // close() callback waits for ALL open connections to end, so a lingering
+    // non-subscribing client would otherwise hang this indefinitely.
+    for (const s of this.#sockets) s.destroy()
+    this.#sockets.clear()
     this.#subscribers.clear()
     const server = this.#server
     if (!server) return

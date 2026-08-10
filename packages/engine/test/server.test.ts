@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { connect, type Socket } from 'node:net'
-import { mkdtempSync, rmSync, statSync } from 'node:fs'
+import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { EngineServer } from '../src/server.js'
@@ -136,11 +136,35 @@ describe('EngineServer', () => {
 
   it('replaces a stale socket file left by a crashed engine', async () => {
     await server.close()
+    // A graceful close() already unlinks the socket file itself, so that
+    // alone doesn't reproduce what a crash leaves behind. Recreate the
+    // leftover inode a killed process actually leaves: a stale, orphaned
+    // file sitting at the socket path with nothing listening on it.
+    writeFileSync(sock, '')
     const again = new EngineServer({
       onEvent: () => {}, onList: () => [], onSnooze: vi.fn(), onMute: vi.fn(),
       onResolve: vi.fn(), onIdle: vi.fn(), onFrontmost: vi.fn(),
     })
     await expect(again.listen(sock)).resolves.toBeUndefined()
+    // Prove the new server is actually live at this path, not merely that
+    // listen() happened to resolve.
+    const { s, next } = await client()
+    s.write(encode({ t: 'ping', id: 1 }))
+    expect(await next()).toMatchObject({ t: 'ok', id: 1 })
+    s.end()
     await again.close()
   })
+
+  it('close() does not hang on a connection that subscribed to nothing and never disconnects', async () => {
+    const { s } = await client()
+    // A server-initiated teardown of this socket may surface as ECONNRESET
+    // on the client side; that's expected here, not a test failure.
+    s.on('error', () => { /* expected: server closes this out from under us */ })
+    // Deliberately send nothing further and never end()/destroy() from the
+    // client side — this reproduces a lingering client (e.g. a Phase 2 GUI
+    // that connected and sent `list` but never disappeared) that must not
+    // make shutdown hang.
+    await expect(server.close()).resolves.toBeUndefined()
+    s.destroy()
+  }, 3000)
 })
