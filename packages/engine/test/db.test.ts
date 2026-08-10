@@ -31,11 +31,33 @@ afterEach(() => {
 
 describe('schema', () => {
   it('creates the file and is reopenable', () => {
+    // Record an event and open a wait in the first instance
     db.recordEvent(ev())
+    db.openWait(session(), 'blocked')
+    const eventCount1 = db.eventCount()
+    const waitCount1 = db.openWaits().length
+    expect(eventCount1).toBe(1)
+    expect(waitCount1).toBe(1)
+    const waitData1 = db.openWaits()[0]
+    const initialWaitingSince = waitData1.waitingSince
+
+    // Close and reopen
     db.close()
     const again = new Db(join(dir, 'test.db'))
-    expect(again.waitsSince(0)).toEqual([])
+    const eventCount2 = again.eventCount()
+    const waitCount2 = again.openWaits().length
+    expect(eventCount2).toBe(1)
+    expect(waitCount2).toBe(1)
+    const waitData2 = again.openWaits()[0]
+    expect(waitData2.waitingSince).toBe(initialWaitingSince)
+
+    // Close and reopen a second time to verify stability
     again.close()
+    const third = new Db(join(dir, 'test.db'))
+    expect(third.eventCount()).toBe(1)
+    expect(third.openWaits()).toHaveLength(1)
+    expect(third.openWaits()[0].waitingSince).toBe(initialWaitingSince)
+    third.close()
   })
 })
 

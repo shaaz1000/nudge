@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module'
+import type { DatabaseSync } from 'node:sqlite'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { NudgeEvent, SessionState, Tier } from '@nudge/shared/types'
@@ -6,7 +7,7 @@ import { dbPath } from '@nudge/shared/paths'
 
 const require = createRequire(import.meta.url)
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { DatabaseSync: DB } = require('node:sqlite')
+const { DatabaseSync: DB } = require('node:sqlite') as typeof import('node:sqlite')
 
 export interface WaitRow {
   id: number
@@ -54,7 +55,7 @@ const toRow = (r: Record<string, unknown>): WaitRow => ({
 })
 
 export class Db {
-  #db: InstanceType<typeof DB>
+  #db: DatabaseSync
 
   constructor(path = dbPath()) {
     mkdirSync(dirname(path), { recursive: true })
@@ -117,8 +118,12 @@ export class Db {
   close(): void {
     try {
       this.#db.close()
-    } catch {
-      // Database already closed, that's fine
+    } catch (err) {
+      // Only ignore "database is not open"; rethrow other errors (I/O, corruption, etc.)
+      if (err instanceof Error && err.message === 'database is not open') {
+        return
+      }
+      throw err
     }
   }
 }
