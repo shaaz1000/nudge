@@ -194,6 +194,8 @@ describe('AskUserQuestion and other blocking tools', () => {
   it('treats ExitPlanMode the same way', () => {
     const t = store.apply(ev('PreToolUse', { tool: 'ExitPlanMode' }))
     expect(t.started).toBe('blocked')
+    expect(t.session.status).toBe('blocked')
+    expect(t.session.waitingSince).toBe(clock.now())
     expect(t.session.message).toMatch(/plan/i)
   })
 
@@ -222,5 +224,17 @@ describe('AskUserQuestion and other blocking tools', () => {
   it('does not treat a PostToolUse for a blocking tool as a new wait', () => {
     const t = store.apply(ev('PostToolUse', { tool: 'AskUserQuestion' }))
     expect(t.started).toBeNull()
+    expect(t.session.status).toBe('running')
+  })
+
+  it('does not treat inherited Object.prototype names as blocking tools', () => {
+    for (const name of ['toString', 'constructor', 'valueOf', 'hasOwnProperty']) {
+      const store2 = new SessionStore(DEFAULT_CONFIG, clock)
+      store2.apply(ev('Notification', { message: 'Allow?' }))
+      const t = store2.apply(ev('PreToolUse', { tool: name }))
+      expect(t.started).toBeNull()
+      expect(t.cleared).toBe('blocked')
+      expect(t.session.status).toBe('running')
+    }
   })
 })

@@ -124,7 +124,9 @@ export class SessionStore {
         break
 
       case 'PreToolUse': {
-        const prompt = ev.tool ? BLOCKING_TOOLS[ev.tool] : undefined
+        const prompt = ev.tool && Object.hasOwn(BLOCKING_TOOLS, ev.tool)
+          ? BLOCKING_TOOLS[ev.tool]
+          : undefined
         if (prompt) {
           s.status = 'blocked'
           s.tier = 'blocked'
