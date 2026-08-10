@@ -1,0 +1,8 @@
+{
+  "session_id": "fixture-session-1",
+  "transcript_path": "/tmp/fixture-project/transcript.jsonl",
+  "cwd": "/tmp/fixture-project",
+  "permission_mode": "default",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "Read readme.txt, then run 'echo captured' in bash, then write a file called out.txt containing the word done. Be brief."
+}

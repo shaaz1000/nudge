@@ -1,0 +1,8 @@
+{
+  "session_id": "fixture-session-1",
+  "transcript_path": "/tmp/fixture-project/transcript.jsonl",
+  "cwd": "/tmp/fixture-project",
+  "hook_event_name": "Notification",
+  "message": "Claude needs your permission to use Read",
+  "notification_type": "permission_prompt"
+}
