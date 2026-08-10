@@ -4319,6 +4319,57 @@ export function readStdin(timeoutMs: number): Promise<string> {
 }
 ```
 
+> **AMENDED 2026-08-10 during execution.** The original `detectSurface` keyed only off
+> terminal environment variables (`TERM_PROGRAM`, `WT_SESSION`, `TMUX`). The **Claude Code
+> desktop app sets none of those**, so it would fingerprint as `unknown` and Phase 2's
+> jump-back would degrade to copying the path to the clipboard — even though the design doc
+> claims desktop-app focusing is "solid". Since the fingerprint is captured once per session
+> and is what Phase 2 acts on, fixing it later would mean changing the hook *and* re-capturing
+> every already-running session. The additions below close that gap.
+>
+> **Additional requirements for this task:**
+>
+> 1. Extend `Surface` in `packages/shared/src/types.ts` with an optional host-app field.
+>    Additive and optional, so no existing code or test changes:
+>    ```ts
+>    export interface Surface {
+>      kind: SurfaceKind
+>      // ... existing optional fields unchanged ...
+>      /** Host application identified by walking the parent-process chain (SessionStart only). */
+>      app?: { name: string; path?: string; pid?: number }
+>    }
+>    ```
+>    Add `'desktop'` to `SurfaceKind` if it is not already present.
+>
+> 2. Add `detectHostApp(): Surface['app'] | undefined` to `surface.ts`. It walks the
+>    parent-process chain from `process.ppid` upward, at most **5 hops**, looking for a
+>    recognisable host application, and returns the first match.
+>    - macOS/Linux: `execFileSync('ps', ['-o', 'ppid=,comm=', '-p', String(pid)], { timeout: 150, encoding: 'utf8', stdio: ['ignore','pipe','ignore'] })`
+>    - Windows: `execFileSync('powershell', ['-NoProfile','-Command', `(Get-CimInstance Win32_Process -Filter \"ProcessId=${pid}\").ParentProcessId,(Get-CimInstance Win32_Process -Filter \"ProcessId=${pid}\").Name`], { timeout: 300, encoding: 'utf8' })`
+>
+>    Match on the executable name containing `Claude` (case-insensitive) for the desktop app,
+>    and on `Code`/`Cursor`/`Windsurf` as a fallback when the env vars are absent.
+>
+> 3. **This must never violate the hook's contract.** Three rules, all testable:
+>    - `detectHostApp` is called **only** when the hook is handling `SessionStart`. Every
+>      other hook event skips it entirely — it must not add latency to a `PreToolUse` that
+>      fires on every tool call.
+>    - The whole function is wrapped in try/catch and returns `undefined` on any failure,
+>      timeout, or missing `ps`. A fingerprint is a nice-to-have; the event is not.
+>    - Each `execFileSync` carries an explicit `timeout`, and the total walk is bounded by
+>      the hop limit. The hook's 500ms budget and `exit 0` guarantee still hold.
+>
+> 4. **Precedence:** an environment-variable match wins over the process walk. If
+>    `TERM_PROGRAM=vscode`, the kind stays `vscode` even if the parent chain also mentions
+>    an app — the env var is the more specific signal. The process walk only sets `kind` when
+>    the env vars produced `unknown`, and it always populates `app` when it finds something.
+>
+> 5. **Tests to add** (alongside the brief's existing seven): `detectHostApp` returns
+>    `undefined` rather than throwing when the probe command is missing or times out; the hop
+>    limit is respected; an env-var match takes precedence over a process-walk match; and a
+>    non-`SessionStart` event never invokes the walk (assert via an injected probe spy that it
+>    was not called). Inject the process-probe function so no test spawns a real `ps`.
+
 `packages/hook/src/surface.ts`:
 
 ```ts
