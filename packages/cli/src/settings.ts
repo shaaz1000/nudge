@@ -1,8 +1,18 @@
 import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { claudeSettingsPath } from '@nudge/shared/paths'
 
-/** Every hook Nudge installs carries this marker so uninstall is exact. */
+/**
+ * Historical/informational marker — the real installed command naturally
+ * contains this (the hook package's bin is literally named `nudge-hook`).
+ * It is NOT used to identify Nudge's own entries; see `_nudge` below. Text
+ * a user fully controls (their own hook command) must never be what decides
+ * whether Nudge is allowed to overwrite or delete an entry.
+ */
 export const NUDGE_MARK = 'nudge-hook'
+
+/** Schema version stamped on every entry Nudge owns, for future migrations. */
+const NUDGE_SCHEMA_VERSION = 1
 
 const HOOKS_WITH_MATCHER = ['PreToolUse', 'PostToolUse'] as const
 const ALL_HOOKS = [
@@ -10,19 +20,28 @@ const ALL_HOOKS = [
   'PostToolUse', 'Notification', 'Stop', 'SessionEnd',
 ] as const
 
-interface HookEntry { matcher?: string; hooks: Array<{ type: string; command: string }> }
+interface HookEntry {
+  matcher?: string
+  hooks: Array<{ type: string; command: string }>
+  _nudge: number
+}
 
 function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
 }
 
+/**
+ * Identifies Nudge's own entry by the `_nudge` key Nudge itself writes —
+ * never by inspecting the user-controlled `command` text. A user hook that
+ * happens to mention "nudge-hook" in its own command must not be mistaken
+ * for ours; only a key we own can prove ownership.
+ */
 function isNudgeEntry(e: unknown): boolean {
-  return isObj(e) && Array.isArray(e.hooks)
-    && e.hooks.some(h => isObj(h) && typeof h.command === 'string' && h.command.includes(NUDGE_MARK))
+  return isObj(e) && typeof e._nudge === 'number'
 }
 
 function entryFor(hook: string, command: string): HookEntry {
-  const e: HookEntry = { hooks: [{ type: 'command', command }] }
+  const e: HookEntry = { hooks: [{ type: 'command', command }], _nudge: NUDGE_SCHEMA_VERSION }
   if ((HOOKS_WITH_MATCHER as readonly string[]).includes(hook)) e.matcher = '*'
   return e
 }
@@ -87,14 +106,27 @@ export function removeHooks(existing: unknown): {
 export function backupSettings(path = claudeSettingsPath()): string | null {
   if (!existsSync(path)) return null
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-  const dest = `${path}.nudge-backup-${stamp}`
+  // A short random suffix keeps two backups in the same millisecond from
+  // silently overwriting one another.
+  const suffix = randomBytes(3).toString('hex')
+  const dest = `${path}.nudge-backup-${stamp}-${suffix}`
   copyFileSync(path, dest)
   return dest
 }
 
 function readSettings(path: string): Record<string, unknown> {
   if (!existsSync(path)) return {}
-  const raw = readFileSync(path, 'utf8')
+
+  let raw: string
+  try {
+    raw = readFileSync(path, 'utf8')
+  } catch (err) {
+    throw new Error(
+      `Refusing to touch ${path}: could not read it (${(err as Error).message}). ` +
+      `Check file permissions, then re-run setup.`,
+    )
+  }
+
   try {
     const parsed = JSON.parse(raw)
     if (!isObj(parsed)) throw new Error('not an object')
@@ -107,6 +139,13 @@ function readSettings(path: string): Record<string, unknown> {
   }
 }
 
+/** True when `existing` already has a Nudge-owned entry under this hook name. */
+function hasNudgeEntry(existing: Record<string, unknown>, name: string): boolean {
+  const hooks = isObj(existing.hooks) ? existing.hooks as Record<string, unknown> : {}
+  const list = Array.isArray(hooks[name]) ? hooks[name] as unknown[] : []
+  return list.some(isNudgeEntry)
+}
+
 export function applySetup(opts: { command: string; dryRun: boolean; path?: string }): {
   added: number; backup: string | null; diff: string
 } {
@@ -114,10 +153,16 @@ export function applySetup(opts: { command: string; dryRun: boolean; path?: stri
   const existing = readSettings(path)
   const { merged, added } = mergeHooks(existing, opts.command)
 
+  // Distinguish a genuine addition from an overwrite of Nudge's own existing
+  // entry (e.g. the install path moved) — both look identical if we only
+  // ever print "+", which hides a real change from the user before they
+  // commit to it.
   const diff = [
     `--- ${path} (current)`,
     `+++ ${path} (after setup)`,
-    ...ALL_HOOKS.map(h => `+ hooks.${h}[]  ->  ${opts.command}`),
+    ...ALL_HOOKS.map(h => hasNudgeEntry(existing, h)
+      ? `~ hooks.${h}[]  (updating existing Nudge entry)  ->  ${opts.command}`
+      : `+ hooks.${h}[]  ->  ${opts.command}`),
   ].join('\n')
 
   if (opts.dryRun) return { added, backup: null, diff }

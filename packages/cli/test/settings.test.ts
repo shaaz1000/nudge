@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { mergeHooks, removeHooks, backupSettings, applySetup, NUDGE_MARK } from '../src/settings.js'
+import { mergeHooks, removeHooks, backupSettings, applySetup, hookEntriesFor, NUDGE_MARK } from '../src/settings.js'
 
 const CMD = 'node /opt/nudge/packages/nudge-hook/dist/bin.js'
 let dir: string
@@ -65,6 +65,37 @@ describe('mergeHooks preserves everything it did not add', () => {
 
   it('rejects a settings file that is not an object', () => {
     expect(() => mergeHooks([1, 2, 3], CMD)).toThrow(/object/)
+  })
+})
+
+describe('marker collision — a user hook whose command legitimately contains "nudge-hook"', () => {
+  it('is left untouched by mergeHooks and survives removeHooks intact (round-trip)', () => {
+    const original = {
+      hooks: { Stop: [{ hooks: [{ type: 'command', command: 'backup-nudge-hook-configs.sh' }] }] },
+    }
+    const { merged: afterInstall, added } = mergeHooks(original, CMD)
+    expect(added).toBe(7)
+    const stop = (afterInstall.hooks as Record<string, unknown[]>).Stop
+    expect(stop).toHaveLength(2)
+    expect(JSON.stringify(stop[0])).toContain('backup-nudge-hook-configs.sh')
+
+    const { merged: back, removed } = removeHooks(afterInstall)
+    expect(removed).toBe(7)
+    expect(JSON.stringify(back)).toBe(JSON.stringify(original))
+  })
+})
+
+describe('hookEntriesFor', () => {
+  it('returns one entry per hook, with a matcher only on PreToolUse/PostToolUse', () => {
+    const entries = hookEntriesFor(CMD)
+    expect(Object.keys(entries).sort()).toEqual([
+      'Notification', 'PostToolUse', 'PreToolUse', 'SessionEnd',
+      'SessionStart', 'Stop', 'UserPromptSubmit',
+    ])
+    expect(entries.PreToolUse[0].matcher).toBe('*')
+    expect(entries.PostToolUse[0].matcher).toBe('*')
+    expect(entries.Stop[0].matcher).toBeUndefined()
+    expect(entries.Stop[0].hooks).toEqual([{ type: 'command', command: CMD }])
   })
 })
 
@@ -131,6 +162,24 @@ describe('applySetup', () => {
     writeFileSync(file, '{ this is broken')
     expect(() => applySetup({ command: CMD, dryRun: false, path: file })).toThrow(/parse/i)
     expect(readFileSync(file, 'utf8')).toBe('{ this is broken')
+  })
+
+  it('gives a friendly "could not read" message, not a raw fs error, when the file exists but is unreadable', () => {
+    writeFileSync(file, '{"model":"opus"}')
+    chmodSync(file, 0o000)
+    try {
+      expect(() => applySetup({ command: CMD, dryRun: false, path: file })).toThrow(/could not read/i)
+    } finally {
+      chmodSync(file, 0o644)
+    }
+  })
+
+  it('marks an overwrite of an existing Nudge entry differently from a genuine addition in the dry-run diff', () => {
+    const already = mergeHooks({}, CMD).merged
+    writeFileSync(file, JSON.stringify(already))
+    const r = applySetup({ command: '/moved/path/nudge-hook/dist/bin.js', dryRun: true, path: file })
+    expect(r.diff).toMatch(/~ hooks\.Stop\[]/)
+    expect(r.diff).not.toMatch(/\+ hooks\.Stop\[]/)
   })
 
   it('creates the file when absent', () => {
