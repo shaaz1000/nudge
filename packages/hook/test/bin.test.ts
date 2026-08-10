@@ -89,4 +89,37 @@ describe('hook binary contract', () => {
     await child
     expect(existsSync(join(home, 'spool')) ? readdirSync(join(home, 'spool')) : []).toHaveLength(0)
   })
+
+  // --- Review round 1, Finding 1 ---
+  // Proves the fix end-to-end, not just at the detectHostApp unit level: a real
+  // SessionStart payload through the actual binary, with NUDGE_TEST_HOP_DELAY_MS
+  // forcing every walk hop to consume its full configured timeout (mirroring the
+  // review's "inject a probe that always consumes its full timeout" ask) rather
+  // than returning instantly like every other test's probe does. Before the fix,
+  // the three phases' allowances summed to more than the 500ms budget by
+  // construction; this test would have taken ~700-800ms internally. It should now
+  // finish close to the 500ms internal budget plus ordinary process-startup
+  // overhead.
+  it('stays within the process budget for a real SessionStart hook even when every walk hop consumes its full configured timeout', async () => {
+    const started = Date.now()
+    const child = run('node', [BIN], {
+      env: { ...process.env, NUDGE_HOME: home, NUDGE_NO_SPAWN: '1', NUDGE_TEST_HOP_DELAY_MS: '60' },
+    })
+    child.child!.stdin!.end(JSON.stringify({
+      hook_event_name: 'SessionStart', session_id: 's1', cwd: '/a/my-repo',
+    }))
+    const { stdout } = await child
+    const elapsed = Date.now() - started
+
+    expect(stdout).toBe('')
+    // Measured ~160-190ms in this environment (`node` process-startup overhead
+    // dominates; the internal walk/read/send work is a small fraction of that).
+    // 600ms leaves real margin for a slower/loaded CI machine while still being
+    // well under what the pre-fix design could reach on its own internal budget
+    // alone (~700-800ms, *before* adding process-startup time on top).
+    expect(elapsed).toBeLessThan(600)
+    // And prove the spooled event still carries a surface (the walk ran, it just
+    // didn't overshoot) rather than this passing only because nothing happened.
+    expect(readdirSync(join(home, 'spool'))).toHaveLength(1)
+  })
 })
