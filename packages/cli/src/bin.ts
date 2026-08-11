@@ -39,7 +39,14 @@ try {
   switch (cmd) {
     case 'setup': {
       const dryRun = rest.includes('--dry-run')
-      const r = applySetup({ command: `node ${HOOK_BIN}`, dryRun })
+      // Quoted, and using this process's own execPath rather than a bare
+      // `node`: a space in the install path (e.g. "Application Support")
+      // would otherwise break all seven hook entries, and an unquoted bare
+      // `node` can resolve to whatever Node happens to be first on the
+      // *shell's* PATH at hook-invocation time — not necessarily one new
+      // enough to have `node:sqlite`. installService() below already uses
+      // process.execPath for the same reason.
+      const r = applySetup({ command: `"${process.execPath}" "${HOOK_BIN}"`, dryRun })
       if (dryRun) { console.log(r.diff); console.log(`\n${r.added} hook(s) would be added.`); break }
       console.log(`Added ${r.added} hook(s) to ${claudeSettingsPath()}`)
       if (r.backup) console.log(`Backup: ${r.backup}`)
