@@ -14,6 +14,23 @@ export interface ServerHandlers {
   onResolve(sessionId: string): void
   onIdle(idleMs: number): void
   onFrontmost(sessionId: string | null): void
+  /**
+   * Review round 1, Finding 5 (USER-APPROVED): fires the instant the LAST
+   * remaining GUI client (see `#guiSubscribers` below) disconnects while
+   * sessions are still waiting. Optional (defaults to a no-op via `?.()`
+   * below) so every existing test that builds `ServerHandlers` without it —
+   * and there are many, across server.test.ts/engine.test.ts/integration.test.ts
+   * — keeps working unchanged; bin.ts's real wiring always supplies it.
+   *
+   * Why this exists: `Engine#onLocal` skips its own desktop notification
+   * whenever `hasGuiClient()` is true, trusting the tray's own clickable one
+   * instead. That trust is only safe if the fallback resumes IMMEDIATELY when
+   * the last GUI vanishes (tray quit or crashed) — "the instant no GUI client
+   * is connected," not merely "whenever the next scheduled local-repeat timer
+   * happens to fire" (which could be `localRepeatIntervalMs` away, or never,
+   * if `localRepeat` is configured to 0). See Engine#onGuiDisconnected.
+   */
+  onGuiDisconnected?(): void
 }
 
 export class EngineServer {
@@ -24,6 +41,10 @@ export class EngineServer {
   #sockets = new Set<Socket>()
   // Subset of #sockets that opted into `subscribe` — the only ones broadcast() writes to.
   #subscribers = new Set<Socket>()
+  // Subset of #subscribers that subscribed with `gui: true` (Finding 5) — the
+  // set `hasGuiClient()` reports on, and whose emptying (from >0 to 0) fires
+  // `onGuiDisconnected`.
+  #guiSubscribers = new Set<Socket>()
 
   constructor(private h: ServerHandlers) {}
 
@@ -63,8 +84,28 @@ export class EngineServer {
     const dec = new NdjsonDecoder()
     this.#sockets.add(sock)
     sock.setEncoding('utf8')
-    sock.on('error', () => { this.#sockets.delete(sock); this.#subscribers.delete(sock) })
-    sock.on('close', () => { this.#sockets.delete(sock); this.#subscribers.delete(sock) })
+    // Finding 5: both handlers also drop `sock` from `#guiSubscribers` (a
+    // plain Set#delete is a harmless no-op if it was never a GUI subscriber
+    // in the first place — same "belt and braces, cheap to duplicate"
+    // pattern this method already uses for #sockets/#subscribers). Node
+    // always emits 'close' after 'error' for a Socket, so on an errored
+    // socket `wasGui` is true on the FIRST handler to run and false on the
+    // second (the entry is already gone) — `onGuiDisconnected` fires at most
+    // once per socket, not twice.
+    const onGone = (): void => {
+      const wasGui = this.#guiSubscribers.delete(sock)
+      this.#sockets.delete(sock)
+      this.#subscribers.delete(sock)
+      if (wasGui && this.#guiSubscribers.size === 0) {
+        try {
+          this.h.onGuiDisconnected?.()
+        } catch (err) {
+          console.error('nudge server: onGuiDisconnected handler failed', err)
+        }
+      }
+    }
+    sock.on('error', onGone)
+    sock.on('close', onGone)
     sock.on('data', chunk => {
       for (const raw of dec.push(chunk as unknown as string)) {
         this.#handle(sock, raw as ClientMessage)
@@ -116,6 +157,7 @@ export class EngineServer {
         case 'list':     this.#reply(sock, { t: 'ok', id: m.id, data: this.h.onList() }); return
         case 'subscribe':
           this.#subscribers.add(sock)
+          if (m.gui) this.#guiSubscribers.add(sock)
           this.#reply(sock, { t: 'ok', id: m.id })
           return
         case 'snooze':
@@ -152,6 +194,11 @@ export class EngineServer {
     }
   }
 
+  /** Finding 5: whether at least one currently-connected client declared itself a GUI via `subscribe({ gui: true })`. */
+  hasGuiClient(): boolean {
+    return this.#guiSubscribers.size > 0
+  }
+
   async close(): Promise<void> {
     // Destroy every accepted connection, not just subscribers — net.Server's
     // close() callback waits for ALL open connections to end, so a lingering
@@ -159,6 +206,13 @@ export class EngineServer {
     for (const s of this.#sockets) s.destroy()
     this.#sockets.clear()
     this.#subscribers.clear()
+    // Cleared synchronously here (before the sockets' own async 'close'
+    // events land) so a graceful shutdown never fires `onGuiDisconnected` —
+    // there is nothing useful to fall back to while the engine itself is
+    // going down. By the time each destroyed socket's 'close' event actually
+    // fires, this set is already empty, so #attach's `onGone` sees
+    // `wasGui === false` for all of them.
+    this.#guiSubscribers.clear()
     const server = this.#server
     if (!server) return
     this.#server = null

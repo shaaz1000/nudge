@@ -175,7 +175,11 @@ export function main(deps: MainDeps = {}): void {
   void surface.whenReady().then(() => {
     // See EngineClientLike's doc above: never construct a real EngineClient
     // with no override outside of production use (deps.client is undefined).
-    const client: EngineClientLike = deps.client ?? new EngineClient()
+    // `gui: true` (review round 1, Finding 5 — USER-APPROVED): this tray IS
+    // the clickable GUI notification the engine defers to — see notify.ts's
+    // Notifier class doc for the double-notification problem this closes,
+    // and engine.ts's onLocal for the other half of the fix.
+    const client: EngineClientLike = deps.client ?? new EngineClient({ gui: true })
     const spawnEngine = deps.spawnEngine ?? defaultSpawnEngine
     const openHistoryFolder = deps.openHistoryFolder ?? (path => { void shell.openPath(path) })
     const focus = deps.focusSession ?? focusSession

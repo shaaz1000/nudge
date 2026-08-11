@@ -10,6 +10,18 @@ export interface EngineClientOptions {
   initialBackoffMs?: number
   /** Reconnect backoff cap in ms — the design constraint calls for 30s. */
   maxBackoffMs?: number
+  /**
+   * Review round 1, Finding 5 (USER-APPROVED): declares this connection a GUI
+   * client on every `subscribe`, so the engine can skip its own desktop
+   * notification and trust this client to show a clickable one instead (see
+   * packages/engine/src/engine.ts's `onLocal`). Defaults to `false` — an
+   * `EngineClient` that doesn't opt in behaves exactly as before. Only
+   * packages/tray/src/main.ts sets this to `true`; the VS Code extension
+   * deliberately does not (see extension.ts's comment for why: its toasts are
+   * only visible while the editor window itself is focused, so it cannot
+   * safely stand in for the engine's OS-level banner).
+   */
+  gui?: boolean
 }
 
 const DEFAULT_INITIAL_BACKOFF_MS = 1_000
@@ -49,12 +61,14 @@ export class EngineClient {
   // fed to the very same `onState` listeners a `state` broadcast uses, so
   // callers never need to know the difference.
   #pendingListId: number | null = null
+  readonly #gui: boolean
 
   constructor(opts: EngineClientOptions = {}) {
     this.#path = opts.path ?? socketPath()
     this.#initialBackoffMs = opts.initialBackoffMs ?? DEFAULT_INITIAL_BACKOFF_MS
     this.#maxBackoffMs = opts.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS
     this.#backoffMs = this.#initialBackoffMs
+    this.#gui = opts.gui ?? false
   }
 
   get connected(): boolean {
@@ -101,7 +115,7 @@ export class EngineClient {
     sock.on('connect', () => {
       this.#connected = true
       this.#backoffMs = this.#initialBackoffMs
-      this.send({ t: 'subscribe', id: this.#nextId++ })
+      this.send({ t: 'subscribe', id: this.#nextId++, gui: this.#gui })
       // Finding I1: `subscribe` alone only arms future broadcasts. Asking
       // for `list` right behind it fills in whatever the engine is already
       // holding — the fix for a client that connects (or reconnects) into a

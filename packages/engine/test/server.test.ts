@@ -19,9 +19,9 @@ const session = (): SessionState => ({
   message: 'Allow?', snoozedUntil: null, pushFailed: false,
 })
 
-function client(): Promise<{ s: Socket; next: () => Promise<unknown> }> {
+function client(path: string = sock): Promise<{ s: Socket; next: () => Promise<unknown> }> {
   return new Promise(resolve => {
-    const s = connect(sock, () => {
+    const s = connect(path, () => {
       const d = new NdjsonDecoder()
       const queue: unknown[] = []
       let waiter: ((v: unknown) => void) | null = null
@@ -245,6 +245,174 @@ describe('EngineServer', () => {
     expect(await next()).toMatchObject({ t: 'ok', id: 1 })
     s.end()
     await again.close()
+  })
+
+  // --- Review round 1, Finding 5 (USER-APPROVED) ---
+  // `gui: true` on `subscribe` is how a client (currently only the Electron
+  // tray) declares itself a GUI so Engine#onLocal can skip its own desktop
+  // notification and trust the tray's clickable one instead. `hasGuiClient()`
+  // is what onLocal reads; `onGuiDisconnected` is what fires the instant that
+  // goes from true to false, so the engine's own notifications resume
+  // immediately rather than waiting for the next scheduled escalation
+  // repeat — see engine.ts's onLocal/onGuiDisconnected docs for the full
+  // design.
+  describe('GUI client tracking (Finding 5)', () => {
+    it('hasGuiClient() is false with no subscribers at all', () => {
+      expect(server.hasGuiClient()).toBe(false)
+    })
+
+    it('a plain subscribe (no `gui`) does not count as a GUI client', async () => {
+      const { s, next } = await client()
+      s.write(encode({ t: 'subscribe', id: 1 }))
+      await next()
+      expect(server.hasGuiClient()).toBe(false)
+      s.end()
+    })
+
+    it('subscribe({ gui: true }) makes hasGuiClient() true', async () => {
+      const { s, next } = await client()
+      s.write(encode({ t: 'subscribe', id: 1, gui: true }))
+      await next()
+      expect(server.hasGuiClient()).toBe(true)
+      s.end()
+    })
+
+    it('two GUI subscribers: disconnecting one still leaves hasGuiClient() true', async () => {
+      const a = await client()
+      const b = await client()
+      a.s.write(encode({ t: 'subscribe', id: 1, gui: true }))
+      await a.next()
+      b.s.write(encode({ t: 'subscribe', id: 2, gui: true }))
+      await b.next()
+      expect(server.hasGuiClient()).toBe(true)
+
+      a.s.destroy()
+      await vi.waitFor(() => expect(server.hasGuiClient()).toBe(true)) // b is still connected
+      b.s.end()
+    })
+
+    function guiServer() {
+      const onGuiDisconnected = vi.fn()
+      const s = new EngineServer({
+        onEvent: () => {}, onList: () => [], onSnooze: vi.fn(), onMute: vi.fn(),
+        onResolve: vi.fn(), onIdle: vi.fn(), onFrontmost: vi.fn(), onGuiDisconnected,
+      })
+      return { s, onGuiDisconnected }
+    }
+
+    it('fires onGuiDisconnected the instant the LAST GUI subscriber disconnects', async () => {
+      const { s: guiSock, onGuiDisconnected } = guiServer()
+      const p = join(dir, 'gui1.sock')
+      await guiSock.listen(p)
+      try {
+        const a = await client(p)
+        a.s.write(encode({ t: 'subscribe', id: 1, gui: true }))
+        await a.next()
+        expect(guiSock.hasGuiClient()).toBe(true)
+
+        a.s.destroy()
+        await vi.waitFor(() => expect(onGuiDisconnected).toHaveBeenCalledTimes(1))
+        expect(guiSock.hasGuiClient()).toBe(false)
+      } finally {
+        await guiSock.close()
+      }
+    })
+
+    it('does NOT fire onGuiDisconnected while at least one other GUI subscriber remains', async () => {
+      const { s: guiSock, onGuiDisconnected } = guiServer()
+      const p = join(dir, 'gui2.sock')
+      await guiSock.listen(p)
+      try {
+        const a = await client(p)
+        const b = await client(p)
+        a.s.write(encode({ t: 'subscribe', id: 1, gui: true }))
+        await a.next()
+        b.s.write(encode({ t: 'subscribe', id: 2, gui: true }))
+        await b.next()
+
+        a.s.destroy()
+        await new Promise(r => setTimeout(r, 50))
+        expect(onGuiDisconnected).not.toHaveBeenCalled()
+        expect(guiSock.hasGuiClient()).toBe(true) // b is still connected
+
+        b.s.destroy()
+        await vi.waitFor(() => expect(onGuiDisconnected).toHaveBeenCalledTimes(1))
+      } finally {
+        await guiSock.close()
+      }
+    })
+
+    it('does NOT fire onGuiDisconnected when a non-GUI subscriber disconnects', async () => {
+      const { s: guiSock, onGuiDisconnected } = guiServer()
+      const p = join(dir, 'gui3.sock')
+      await guiSock.listen(p)
+      try {
+        const a = await client(p)
+        a.s.write(encode({ t: 'subscribe', id: 1 })) // no `gui`
+        await a.next()
+
+        a.s.destroy()
+        await new Promise(r => setTimeout(r, 50))
+        expect(onGuiDisconnected).not.toHaveBeenCalled()
+      } finally {
+        await guiSock.close()
+      }
+    })
+
+    it('fires onGuiDisconnected only once for a socket that both errors and closes', async () => {
+      const { s: guiSock, onGuiDisconnected } = guiServer()
+      const p = join(dir, 'gui4.sock')
+      await guiSock.listen(p)
+      try {
+        const a = await client(p)
+        a.s.on('error', () => { /* expected: forcing a reset below */ })
+        a.s.write(encode({ t: 'subscribe', id: 1, gui: true }))
+        await a.next()
+
+        // resetAndDestroy() surfaces as an 'error' on the client side, and
+        // Node always emits 'close' after 'error' — exactly the double-event
+        // sequence #attach's `onGone` has to collapse into one call.
+        a.s.destroy(new Error('forced reset'))
+        await vi.waitFor(() => expect(onGuiDisconnected).toHaveBeenCalledTimes(1))
+        await new Promise(r => setTimeout(r, 50))
+        expect(onGuiDisconnected).toHaveBeenCalledTimes(1) // still just once
+      } finally {
+        await guiSock.close()
+      }
+    })
+
+    it('a graceful close() never fires onGuiDisconnected — nothing useful to fall back to while the engine itself is shutting down', async () => {
+      const { s: guiSock, onGuiDisconnected } = guiServer()
+      const p = join(dir, 'gui5.sock')
+      await guiSock.listen(p)
+      const a = await client(p)
+      a.s.on('error', () => { /* expected: server-initiated teardown */ })
+      a.s.write(encode({ t: 'subscribe', id: 1, gui: true }))
+      await a.next()
+
+      await guiSock.close()
+      await new Promise(r => setTimeout(r, 50))
+      expect(onGuiDisconnected).not.toHaveBeenCalled()
+    })
+
+    it('missing onGuiDisconnected (an older/partial ServerHandlers) never throws when the last GUI disconnects', async () => {
+      const noHandler = new EngineServer({
+        onEvent: () => {}, onList: () => [], onSnooze: vi.fn(), onMute: vi.fn(),
+        onResolve: vi.fn(), onIdle: vi.fn(), onFrontmost: vi.fn(),
+        // onGuiDisconnected deliberately omitted.
+      })
+      const p = join(dir, 'gui6.sock')
+      await noHandler.listen(p)
+      try {
+        const a = await client(p)
+        a.s.write(encode({ t: 'subscribe', id: 1, gui: true }))
+        await a.next()
+        a.s.destroy()
+        await new Promise(r => setTimeout(r, 50)) // would throw synchronously in the 'close' handler if unguarded
+      } finally {
+        await noHandler.close()
+      }
+    })
   })
 
   it('close() does not hang on a connection that subscribed to nothing and never disconnects', async () => {

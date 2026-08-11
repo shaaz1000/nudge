@@ -143,14 +143,50 @@ export class Engine {
    * first. A throw here (e.g. from a misbehaving DesktopNotifier) would
    * propagate uncaught out of that timer and crash the daemon, so it is
    * caught and logged rather than left to escape.
+   *
+   * Review round 1, Finding 5 (USER-APPROVED): with the Electron tray
+   * running, one waiting session used to produce TWO banners — this one
+   * (fired synchronously, before `server.broadcast()` even runs, so no
+   * tray-side change could ever preempt it) and the tray's own clickable
+   * `Notifier` (packages/tray/src/notify.ts). `this.d.server.hasGuiClient()`
+   * is re-checked on EVERY call (t=0 and every repeat), not cached from
+   * begin() — so if the tray quits or crashes mid-wait, the very next
+   * scheduled repeat (or `onGuiDisconnected`, immediately, see below) resumes
+   * real desktop notifications rather than leaving the user silently
+   * unalerted. Phone escalation (`onPhone`) and DB history are untouched —
+   * this only gates the desktop banner+sound (`notifier.alert` does both;
+   * see the task report's design section for why splitting them was judged
+   * out of scope here).
    */
   onLocal(s: SessionState, tier: Tier): void {
     try {
       const sup = localSuppression(this.d.cfg, s, tier, this.#frontmost, this.d.clock.now())
       if (sup !== 'none') return
+      if (this.d.server.hasGuiClient()) return
       this.d.notifier.alert(s, tier)
     } catch (err) {
       console.error(`nudge engine: onLocal failed for ${s.sessionId}`, err)
+    }
+  }
+
+  /**
+   * Finding 5: called by the server the instant the LAST connected GUI
+   * client disconnects (tray quit or crashed) — see
+   * `ServerHandlers.onGuiDisconnected`'s doc for why this can't just wait for
+   * the escalation ladder's next scheduled repeat. Every session still
+   * waiting was relying on the tray's own notification instead of this
+   * engine's; that safety net just vanished, so re-run the exact same
+   * `onLocal` check for each of them right now. `onLocal` re-checks
+   * `hasGuiClient()` itself (now false — this is called exactly when it
+   * transitions to false), so this reliably surfaces a real desktop
+   * notification for every currently-waiting session, subject only to the
+   * same suppression rules (DND, frontmost, mute) any other local alert
+   * already respects.
+   */
+  onGuiDisconnected(): void {
+    for (const s of this.d.store.list()) {
+      if (s.tier === null || s.waitingSince === null) continue
+      this.onLocal(s, s.tier)
     }
   }
 

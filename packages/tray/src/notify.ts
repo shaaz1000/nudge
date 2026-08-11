@@ -101,71 +101,44 @@ function defaultSurface(): NotifySurface {
  * `null`, it drops out of the list entirely, or it becomes snoozed) — so a
  * later re-block notifies again.
  *
- * ## The double-notification problem (Task 4, Step 4) — decision and why
+ * ## The double-notification problem (Task 4, Step 4) — history, and its resolution
  *
  * Phase 1's engine (packages/engine/src/engine.ts's `onLocal`, invoked by
  * the `Escalator` at t=0 the instant a session starts waiting, and again on
- * every local repeat) unconditionally fires its own `osascript`/
+ * every local repeat) used to unconditionally fire its own `osascript`/
  * `notify-send`/PowerShell banner via `DesktopNotifier.alert()` —
  * regardless of whether this tray, the VS Code extension, both, or neither
- * is running. There is no existing lever to suppress it without changing
- * `packages/engine` or `packages/shared`'s `NudgeConfig` schema:
+ * was running. At the time this class was first built (Task 4), there was
+ * no lever to suppress it without changing `packages/engine`/
+ * `packages/shared`, which were out of scope for that task — see this
+ * class's git history for the full reasoning that used to live here (why
+ * `mute` and `frontmost` were each the wrong tool for this).
  *
- *   - The socket protocol (`@nudge/shared/protocol`) is fixed at `subscribe,
- *     list, snooze, mute, resolve, idle, frontmost` — there is no
- *     "a richer client is connected" message to send.
- *   - `mute` is too broad: it also disables phone escalation
- *     (`phoneSuppression` checks the same `cfg.muted`), and it is already
- *     wired to the tray's own manual Mute/Unmute menu item (tray.ts) — this
- *     module cannot repurpose it as an automatic "I've got this" signal
- *     without breaking that unrelated, user-facing toggle.
- *   - `frontmost` specifically suppresses `onLocal` for the marked session
- *     (see `localSuppression`), but the Phase 3 plan explicitly warns
- *     against the tray becoming a second `frontmost` reporter (Open
- *     Questions #2) — marking sessions frontmost from here would be
- *     semantically wrong (the tray itself having OS focus proves nothing
- *     about whether the user is looking at the actual waiting window) and
- *     would fight with the VS Code extension's own legitimate use of it.
+ * **Review round 1, Finding 5 (USER-APPROVED) closed this properly**: the
+ * engine now knows when a GUI client is connected (`subscribe({gui:true})`,
+ * see `@nudge/client`'s `EngineClientOptions.gui` and main.ts's wiring of
+ * this exact `EngineClient`) and skips `notifier.alert()` — banner AND
+ * sound, since `DesktopNotifier.alert()` is one call for both — entirely
+ * while one is (see packages/engine/src/engine.ts's `onLocal`). The
+ * VISUAL-duplication defect described in the old version of this comment no
+ * longer exists: with this tray running, only this Notifier's banner shows.
  *
- * Both are changes to `packages/engine`/`packages/shared`, which are out of
- * scope twice over: the Phase 3 plan's own global constraint ("No engine
- * changes. If a task appears to need one, stop and report it.") and this
- * task's explicit scope restriction to `packages/tray` only.
+ * One residual trade-off, deliberately left as-is (out of Finding 5's own
+ * stated scope, which lists `packages/engine`/`shared`/`vscode` — not
+ * `packages/tray`): every notification here is still built `silent: true`
+ * (see `#show` below), which used to be justified by "the engine already
+ * plays a sound for this event, so this module's own default sound would be
+ * a redundant second ding." That justification no longer fully holds — when
+ * this tray IS connected (the common case now), the engine skips its sound
+ * too, so a waiting session currently produces a SILENT visual banner and no
+ * sound at all. Flagged, not silently absorbed: if an audible cue while the
+ * tray is running turns out to matter, the fix is here (drop `silent: true`,
+ * or thread the sound through more deliberately), not in the engine.
  *
- * Given that, the choice actually made here: **ship this Notifier, wired
- * live**, rather than build it and never call it. Withholding it would mean
- * Phase 3 — whose *entire* stated reason for existing is a clickable
- * notification — ships nothing a user can ever see or click, which is a
- * worse outcome than the one being avoided. What IS done to reduce the
- * duplication, entirely within this module's own reach:
- *
- *   - Every notification is created `silent: true` (see `#show` below).
- *     Phase 1's `DesktopNotifier` already plays its own per-tier sound
- *     (`afplay`/`paplay`/a PowerShell `SoundPlayer`, see desktop.ts's
- *     `soundCommand`) as a SEPARATE spawned process from its silent
- *     `osascript`/`notify-send` banner — so an Electron `Notification`
- *     built with its default (non-silent) behaviour would add a SECOND,
- *     purely redundant "ding" on top, costing nothing to suppress since the
- *     sound is not what this module adds. This closes the audible half of
- *     "two banners for one event" without touching the engine.
- *   - This Notifier only ever fires ONCE per wait (de-dup, above), while
- *     the engine's own `onLocal` repeats up to `cfg.escalation.localRepeat`
- *     additional times (default 3, every `localRepeatIntervalMs` = 60s) for
- *     the same unresolved wait — so the tray does not compound the
- *     engine's own repeat cadence; it only adds one clickable option at the
- *     start of it.
- *
- * What is NOT closed, and cannot be without an engine change: the VISUAL
- * banner still doubles at t=0 — the user will see both the engine's
- * (non-clickable) banner and this module's (clickable) one for the same
- * event when both processes are running. This is a real, acknowledged
- * defect, not something silently accepted as fine. The smallest correct fix
- * I can identify for a follow-up task: let `subscribe` carry an optional
- * capability flag (e.g. `{ t: 'subscribe', id, richNotify: true }`) that
- * `Engine#onLocal` checks — via `this.d.server` knowing at least one such
- * client is currently connected — before calling `notifier.alert()`,
- * skipping it only in that case. That is a `packages/engine` +
- * `packages/shared/protocol` change, and is explicitly out of scope here.
+ * This Notifier still only ever fires ONCE per wait (de-dup, above) even
+ * though the engine's own ladder — now effectively paused while a GUI is
+ * connected — would otherwise have repeated up to `cfg.escalation.localRepeat`
+ * additional times (default 3, every `localRepeatIntervalMs` = 60s).
  */
 export class Notifier {
   readonly #onFocus: (s: SessionState) => void
