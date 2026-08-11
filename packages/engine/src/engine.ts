@@ -79,6 +79,22 @@ export class Engine {
     this.d.server.broadcast(this.d.store.list())
   }
 
+  /**
+   * Finding I1: the watchdog's TTL sweep (`store.drop`) used to be the only
+   * thing that happened to an expired session — nothing cancelled its
+   * escalation ladder (if it was mid-wait when it went silent for 24h) and
+   * nothing closed its DB wait row, since `prune()` never deletes an *open*
+   * wait by design. Both are idempotent no-ops when there is nothing to
+   * clean up (Escalator#cancel on an untracked id, Db#closeWait when no
+   * open row matches), so this is always safe to call regardless of
+   * whether the dropped session actually had a live wait.
+   */
+  onWatchdogDrop(sessionId: string): void {
+    this.d.escalator.cancel(sessionId)
+    this.d.db.closeWait(sessionId, this.d.clock.now(), 'ttl')
+    this.d.server.broadcast(this.d.store.list())
+  }
+
   snooze(id: string, ms: number): void {
     this.d.store.snooze(id, ms)
     this.d.escalator.cancel(id)

@@ -67,7 +67,11 @@ const escalator = new Escalator({
   onPhone: (s, tier) => { void engine.onPhone(s, tier) },
 })
 
-const watchdog = new Watchdog(cfg, clock, store, t => engine.onWatchdogStall(t))
+const watchdog = new Watchdog(
+  cfg, clock, store,
+  t => engine.onWatchdogStall(t),
+  id => engine.onWatchdogDrop(id),
+)
 
 const server = new EngineServer({
   onEvent: ev => engine.handle(ev),

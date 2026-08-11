@@ -13,6 +13,18 @@ export class Watchdog {
     private clock: Clock,
     private store: SessionStore,
     private onStall: (t: Transition) => void,
+    /**
+     * Finding I1: `store.drop(id)` below used to be the whole story for a
+     * TTL expiry — nothing told the escalator to cancel that session's
+     * ladder, and nothing closed its DB wait row (`prune()` never deletes an
+     * *open* wait by design, so a dropped session's row became permanent).
+     * The caller (bin.ts wires this to `Engine#onWatchdogDrop`) is
+     * responsible for `escalator.cancel(id)` + `db.closeWait(id, ...)`;
+     * Watchdog itself has no handle on either. Defaults to a no-op so
+     * existing 4-arg call sites that don't care about this cleanup — most
+     * test files construct a Watchdog with only `onStall` — keep compiling.
+     */
+    private onDrop: (sessionId: string) => void = () => {},
   ) {}
 
   start(): Cancel {
@@ -36,6 +48,11 @@ export class Watchdog {
     // TTL first: an expired session should be dropped, not resurrected as stalled.
     for (const id of this.store.idsOlderThan(this.cfg.watchdog.sessionTtlMs)) {
       this.store.drop(id)
+      try {
+        this.onDrop(id)
+      } catch (err) {
+        console.error(`nudge watchdog: onDrop failed for ${id}`, err)
+      }
     }
 
     const cutoff = this.clock.now() - this.cfg.watchdog.stallAfterMs

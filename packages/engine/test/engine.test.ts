@@ -264,6 +264,60 @@ describe('shutdown and suppression against an in-flight ladder', () => {
   })
 })
 
+describe('watchdog TTL drop cleanup (I1)', () => {
+  it('cancels the escalator ladder and closes the open wait row when a session drops past its TTL', () => {
+    const cfg = mergeConfig({
+      channel: { id: 'test', options: {} },
+      watchdog: { stallAfterMs: 900_000, sessionTtlMs: 86_400_000, tickMs: 30_000 },
+    }) as NudgeConfig
+    clock = new FakeClock(0); db = new Db(join(dir, 'ttl.db')); local = []; phone = []
+    const store = new SessionStore(cfg, clock)
+    const dispatcher = new Dispatcher(cfg, clock, async () => ({
+      id: 'test', configSchema: {}, send: async () => { phone.push('sent') },
+    }))
+    const escalator = new Escalator({
+      cfg, clock, idleMs: () => 0,
+      onLocal: (s, t) => engine.onLocal(s, t),
+      onPhone: (s, t) => { void engine.onPhone(s, t) },
+    })
+    const watchdog = new Watchdog(
+      cfg, clock, store,
+      t => engine.onWatchdogStall(t),
+      id => engine.onWatchdogDrop(id),
+    )
+    const server = { broadcast: vi.fn(), listen: vi.fn(), close: vi.fn() }
+    engine = new Engine({
+      cfg, clock, store, db, escalator, dispatcher,
+      notifier: { alert: () => {} } as never, watchdog, server: server as never,
+    })
+
+    engine.handle(ev('Notification', { message: 'Allow?' }))
+    expect(db.openWaits()).toHaveLength(1)
+    // A live ladder, not just a suppressed one — the sharp check the "mute"
+    // and "snooze" tests above already rely on to distinguish cancellation
+    // from mere suppression.
+    expect(escalator.activeCount()).toBeGreaterThan(0)
+
+    clock.advance(86_400_001)
+    watchdog.tick()
+
+    expect(store.get('s1')).toBeUndefined()
+    expect(db.openWaits()).toHaveLength(0)
+    expect(db.waitsSince(0)[0].resolvedBy).toBe('ttl')
+    expect(escalator.activeCount()).toBe(0)
+  })
+
+  it('is a no-op for a session with no open wait — nothing to cancel or close', () => {
+    build()
+    engine.handle(ev('SessionStart'))
+    clock.advance(86_400_001)
+    // watchdog isn't wired to the FakeClock's schedule here (build() stubs
+    // the server, not the watchdog loop), so drive the sweep directly.
+    expect(() => engine.onWatchdogDrop('s1')).not.toThrow()
+    expect(db.openWaits()).toHaveLength(0)
+  })
+})
+
 describe('resume after sleep', () => {
   it('re-arms a still-waiting session so escalation is not lost to a sleeping laptop', async () => {
     build()

@@ -98,6 +98,46 @@ describe('session TTL', () => {
   })
 })
 
+describe('onDrop callback (I1)', () => {
+  it('calls onDrop with the sessionId when a session is dropped past its TTL', () => {
+    const drops: string[] = []
+    const wd2 = new Watchdog(cfg, clock, store, () => {}, id => drops.push(id))
+    store.apply(ev('SessionStart'))
+    clock.advance(86_400_001)
+    wd2.tick()
+    expect(drops).toEqual(['s1'])
+  })
+
+  it('does not call onDrop for a session that merely stalls', () => {
+    const drops: string[] = []
+    const wd2 = new Watchdog(cfg, clock, store, () => {}, id => drops.push(id))
+    store.apply(ev('SessionStart'))
+    clock.advance(900_001)
+    wd2.tick()
+    expect(drops).toEqual([])
+  })
+
+  it('defaults to a no-op onDrop when the callback is omitted, without throwing', () => {
+    const wd2 = new Watchdog(cfg, clock, store, () => {})
+    store.apply(ev('SessionStart'))
+    clock.advance(86_400_001)
+    expect(() => wd2.tick()).not.toThrow()
+    expect(store.get('s1')).toBeUndefined()
+  })
+
+  it('survives a throwing onDrop callback and continues ticking', () => {
+    const wd2 = new Watchdog(cfg, clock, store, () => {}, () => { throw new Error('boom') })
+    store.apply(ev('SessionStart', { sessionId: 's1' }))
+    clock.advance(86_400_001)
+    expect(() => wd2.tick()).not.toThrow()
+
+    store.apply(ev('SessionStart', { sessionId: 's2', ts: clock.now() }))
+    clock.advance(86_400_001)
+    expect(() => wd2.tick()).not.toThrow()
+    expect(store.get('s2')).toBeUndefined()
+  })
+})
+
 describe('start/stop', () => {
   it('ticks on the configured interval until cancelled', () => {
     store.apply(ev('SessionStart'))
