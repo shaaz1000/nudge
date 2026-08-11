@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { dirname } from 'node:path'
 import type { Tier } from './types.js'
 import { configPath } from './paths.js'
 
@@ -201,15 +202,56 @@ export function mergeConfig(partial: unknown): NudgeConfig {
   return cfg
 }
 
-export function loadConfig(path = configPath()): NudgeConfig {
+/**
+ * Reads and JSON.parses the raw config file, or returns `undefined` when it
+ * doesn't exist yet. Shared between `loadConfig` and `setMuted` so both
+ * agree on what "no config file yet" and "malformed config file" mean.
+ *
+ * Also-fix from the review triage: this used to be a bare `JSON.parse(raw)`
+ * inside `loadConfig`. A typo'd config.json (trailing comma, unclosed
+ * brace — exactly what a human hand-editing the file produces) threw an
+ * unwrapped, unnamed `SyntaxError` straight out of the engine's boot
+ * sequence, giving no indication of which file was at fault. Wrapped so the
+ * error names the path.
+ */
+function readRawConfig(path: string): unknown {
   let raw: string
   try {
     raw = readFileSync(path, 'utf8')
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return structuredClone(DEFAULT_CONFIG)
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined
     throw err
   }
-  return mergeConfig(JSON.parse(raw))
+  try {
+    return JSON.parse(raw)
+  } catch (err) {
+    throw new Error(`config: could not parse ${path} as JSON (${(err as Error).message})`)
+  }
+}
+
+export function loadConfig(path = configPath()): NudgeConfig {
+  return mergeConfig(readRawConfig(path))
+}
+
+/**
+ * Finding I7: `nudge mute` only ever flipped `cfg.muted` in the engine's
+ * in-memory config object — nothing wrote it to config.json. `nudge status`
+ * re-reads config.json fresh on every invocation, so it disagreed with
+ * `nudge mute` the moment they ran in different processes (which they always
+ * do — the CLI and the engine are separate processes), and a plain engine
+ * restart silently unmuted everything with no trace it had ever happened.
+ *
+ * Patches only the `muted` key of the on-disk file (creating it, and any
+ * missing parent directory, if it doesn't exist yet) rather than
+ * serializing the whole resolved config, so a mute/unmute round trip never
+ * clobbers whatever else the user has hand-edited into config.json.
+ */
+export function setMuted(on: boolean, path = configPath()): void {
+  const raw = readRawConfig(path)
+  const obj: Record<string, unknown> = isObj(raw) ? { ...raw } : {}
+  obj.muted = on
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, JSON.stringify(obj, null, 2) + '\n', 'utf8')
 }
 
 /**

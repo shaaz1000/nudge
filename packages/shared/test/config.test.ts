@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest'
-import { DEFAULT_CONFIG, mergeConfig, escalateDelayFor } from '../src/config.js'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { DEFAULT_CONFIG, mergeConfig, escalateDelayFor, loadConfig, setMuted } from '../src/config.js'
 
 describe('config defaults', () => {
   it('matches the spec values', () => {
@@ -203,5 +206,73 @@ describe('DEFAULT_CONFIG immutability (Finding 2)', () => {
       cfg.escalation.activeDelayMs = 123
     }).not.toThrow()
     expect(cfg.escalation.activeDelayMs).toBe(123)
+  })
+})
+
+describe('loadConfig', () => {
+  let dir: string
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'nudge-config-')) })
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
+
+  it('returns defaults when the file does not exist', () => {
+    const cfg = loadConfig(join(dir, 'does-not-exist.json'))
+    expect(cfg).toEqual(DEFAULT_CONFIG)
+  })
+
+  it('merges a valid on-disk config over the defaults', () => {
+    const path = join(dir, 'config.json')
+    writeFileSync(path, JSON.stringify({ muted: true }), 'utf8')
+    expect(loadConfig(path).muted).toBe(true)
+  })
+
+  /**
+   * Also-fix from the review triage: loadConfig used to call
+   * `JSON.parse(raw)` completely unwrapped. A typo'd config.json (a stray
+   * comma, an unclosed brace — the kind of thing a human hand-editing the
+   * file produces) threw a bare, unnamed `SyntaxError` that propagated
+   * straight out of the engine's boot sequence with no indication of which
+   * file was at fault. Wrapped so the error names the path.
+   */
+  it('throws a clear, file-naming error on malformed JSON instead of a bare SyntaxError', () => {
+    const path = join(dir, 'config.json')
+    writeFileSync(path, '{ "muted": true, }', 'utf8') // trailing comma: invalid JSON
+    expect(() => loadConfig(path)).toThrow(new RegExp(path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  })
+
+  it('still rejects a validly-parsed but schema-invalid config, unchanged', () => {
+    const path = join(dir, 'config.json')
+    writeFileSync(path, JSON.stringify({ detailLevel: 'loud' }), 'utf8')
+    expect(() => loadConfig(path)).toThrow(/detailLevel/)
+  })
+})
+
+describe('setMuted (Finding I7)', () => {
+  let dir: string
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'nudge-config-mute-')) })
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
+
+  it('creates config.json with muted: true when no config file exists yet', () => {
+    const path = join(dir, 'nested', 'config.json')
+    setMuted(true, path)
+    expect(loadConfig(path).muted).toBe(true)
+  })
+
+  it('persists so a later loadConfig (a fresh `nudge status` process) agrees', () => {
+    const path = join(dir, 'config.json')
+    setMuted(true, path)
+    expect(loadConfig(path).muted).toBe(true)
+    setMuted(false, path)
+    expect(loadConfig(path).muted).toBe(false)
+  })
+
+  it('preserves the rest of an existing hand-edited config.json', () => {
+    const path = join(dir, 'config.json')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(path, JSON.stringify({ detailLevel: 'full', retentionDays: 7 }), 'utf8')
+    setMuted(true, path)
+    const cfg = loadConfig(path)
+    expect(cfg.muted).toBe(true)
+    expect(cfg.detailLevel).toBe('full')
+    expect(cfg.retentionDays).toBe(7)
   })
 })
