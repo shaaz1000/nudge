@@ -16,3 +16,14 @@ jobs:
       - run: npm ci
       - run: npx tsc --build
       - run: npx vitest run
+      # Finding I5: tsc + vitest alone never bundle or package the vscode
+      # extension — a green build here previously said nothing about
+      # whether `vsce package` (which walks node_modules and chokes on this
+      # monorepo's workspace symlink unless run with --no-dependencies) or
+      # the esbuild bundle it depends on actually still produce a loadable
+      # artifact. This exercises the bundle step and then proves the
+      # workspace package specifier got fully inlined by esbuild rather than
+      # left as an unresolved `require('@nudge/...')` that would only ever
+      # fail at runtime, inside a real extension host, on someone's machine.
+      - run: npm run bundle -w nudge-vscode
+      - run: node packages/vscode/scripts/verify-bundle.mjs

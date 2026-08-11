@@ -8,8 +8,15 @@ The problem it solves: an agent stops and waits, you've switched to another
 window or walked away, and nothing tells you. You come back ten minutes
 later to find the task never moved.
 
-This is **Phase 1**: a headless daemon plus desktop and phone notifications.
-There is no tray app and no click-to-jump yet — see [Limitations](#limitations).
+**Phase 1** shipped a headless daemon plus desktop and phone notifications.
+**Phase 2** (this branch) adds a VS Code extension: a status bar item that
+shows whether any of *this window's* sessions are waiting on you, a toast
+the moment one starts, and click-to-jump — clicking the status bar item (or
+a toast's "Go to it" action) brings the right window forward and reveals the
+terminal Claude Code is running in. See [The VS Code extension](#the-vs-code-extension)
+below to build and install it, and [Limitations](#limitations) for what's
+still missing (the OS-level desktop notification itself still isn't
+clickable — that's Phase 3's tray app).
 
 ## How it works
 
@@ -37,12 +44,14 @@ Claude Code                 nudge-hook               nudge-engine
   nobody responds — escalates to your phone through a pluggable channel after
   a fixed delay (`escalation.activeDelayMs`, 3 minutes by default). The
   engine's escalation math (`escalateDelayFor`) already has an idle-aware
-  path that would shorten this once it knows you've stepped away, but nothing
-  in Phase 1 ever reports idle time to it — the socket protocol has an `idle`
-  message and `nudge-engine` can consume one, but no client sends it yet.
-  That's an editor-integration or tray-app job, arriving in Phase 2; until
-  then the delay is the same fixed 3 minutes whether you're at your desk or
-  not.
+  path that would shorten this once it knows you've stepped away, but no
+  client reports idle time to it yet — the socket protocol has an `idle`
+  message and `nudge-engine` can consume one, but the Phase 2 VS Code
+  extension doesn't send it either (it only reports `frontmost`, a
+  different, window-focus-based signal — see
+  [The VS Code extension](#the-vs-code-extension)). Until some client
+  starts sending `idle`, the delay is the same fixed 3 minutes whether
+  you're at your desk or not.
 - **`nudge`** is the CLI: install/uninstall the hooks, start the engine,
   check status, list what's waiting, snooze or mute, send a test push.
 
@@ -253,16 +262,71 @@ export default {
 Then set `"channel": { "id": "pushover", "options": { "appToken": "...", "userKey": "..." } }`
 in your config and run `nudge test`.
 
+## The VS Code extension
+
+`packages/vscode` is a VS Code extension (source name `nudge-vscode`,
+display name "Nudge") that talks to the same engine socket the CLI and hooks
+use — it subscribes for live updates and asks for the current state on
+connect, so it also sees whatever was already waiting before the extension
+started. It adds:
+
+- A status bar item, always visible: `$(bell-slash) Nudge` when the engine
+  is unreachable, dim `$(bell) Nudge` when nothing in *this window* is
+  waiting, and warning-colored `$(bell-dot) Nudge N` — with a tooltip
+  listing each session, its tier, and how long it's been waiting — when N
+  are. Clicking it jumps to a waiting session (prompting you to pick one if
+  this window owns more than one).
+- A toast the moment one of this window's sessions starts waiting, with "Go
+  to it" and "Snooze 10m" actions. Configurable via `nudge.showToasts`.
+- Four commands (Command Palette): **Nudge: Go to Waiting Session**,
+  **Nudge: Snooze a Waiting Session**, **Nudge: Toggle Mute**, **Nudge: Show
+  Waiting Sessions** (lists every waiting session system-wide, not just this
+  window's, and can jump to one in a different workspace by opening or
+  reusing whichever window already has it open).
+
+Jumping to a session **never resolves its wait** — clicking through only
+brings the window forward and focuses the terminal; the wait stays open
+until Claude Code's own hook clears it. And to be precise about what "click"
+means here: this is click-to-jump *inside VS Code* (the status bar item, the
+toast's button, the quick pick). The OS-level desktop notification itself —
+the `osascript` / `notify-send` / PowerShell balloon Phase 1 already fires —
+still is not clickable; making that jump straight from the OS notification
+is Phase 3's tray app.
+
+### Build and install the `.vsix`
+
+There is no published extension yet, so you build and install it from
+source:
+
+```bash
+npm install                    # from the repo root, if you haven't already
+npx tsc --build
+npm run bundle -w nudge-vscode  # esbuild bundle -> packages/vscode/dist/extension.cjs
+npm run package -w nudge-vscode # vsce package --no-dependencies -> packages/vscode/*.vsix
+```
+
+(`vsce package`'s own `node_modules` walk chokes on this monorepo's
+workspace symlink without `--no-dependencies` — the `package` script already
+passes it.) Then, in VS Code: Command Palette → **Extensions: Install from
+VSIX...** → pick the `.vsix` file `npm run package` produced. Reload the
+window if it doesn't pick it up immediately.
+
+Two settings (`nudge.showToasts`, `nudge.socketPath`) are documented inline
+in VS Code's Settings UI under "Nudge".
+
 ## Limitations
 
 These are real limits, not caveats to skim past — you will hit them.
 
-- **No click-to-jump.** Desktop notifications are fire-and-forget platform
-  CLIs (`osascript` / `notify-send` / a PowerShell balloon tip); clicking one
-  does nothing, and there is no way to make it do something in Phase 1.
-  Jumping back to the exact editor window arrives with the tray app in
-  Phase 2 — the engine's socket protocol already supports a GUI client
-  subscribing for this, but nothing consumes it yet.
+- **The OS-level desktop notification itself is still not clickable.**
+  Desktop notifications are fire-and-forget platform CLIs (`osascript` /
+  `notify-send` / a PowerShell balloon tip); clicking one does nothing, and
+  there is no way to make it do something without a native app watching for
+  it. Click-to-jump *inside* VS Code shipped in Phase 2 (see
+  [The VS Code extension](#the-vs-code-extension) above) — a status bar
+  item and toast actions that bring the right window forward. Making the
+  literal OS notification clickable, so you never have to switch to VS Code
+  first to click anything, is Phase 3's tray app.
 - **The watchdog is heuristic.** A session sitting in `PreToolUse` on a
   nine-minute test script looks identical, from the hook's point of view, to
   one whose process has crashed — there is no way to tell them apart from
@@ -327,7 +391,11 @@ a real socket end to end — run `npx tsc --build` first, or it won't find
 `packages/hook/dist/bin.js`.
 
 CI (`.github/workflows/ci.yml`) runs the full build and suite on Node 24
-across Ubuntu, macOS, and Windows.
+across Ubuntu, macOS, and Windows, and also bundles `packages/vscode` and
+asserts the bundle has no unresolved `@nudge/` workspace imports — `tsc
+--build` and `vitest run` alone can be green while the packaged extension
+is still a dead artifact (see [The VS Code extension](#the-vs-code-extension)),
+so this is a separate, deliberate step, not implied by the two above it.
 
 ### Layout
 
@@ -338,9 +406,13 @@ packages/
   engine/    session state machine, escalation ladder, watchdog, sqlite history, socket server
   channels/  the Channel interface, the built-in ntfy adapter, the channel loader
   cli/       nudge setup/uninstall/start/status/list/test/snooze/mute
+  vscode/    the VS Code extension: status bar, toasts, click-to-jump (Phase 2)
 ```
 
 Zero third-party runtime dependencies in `hook` and `engine` — both are meant
 to run for days as an unattended background process, so their dependency
 surface is deliberately tiny. `shared` and `channels` are internal workspace
-packages, not exceptions to that rule.
+packages, not exceptions to that rule. `vscode` is the one package allowed a
+real dependency footprint (`@types/vscode`, `esbuild`, `@vscode/vsce`) —
+its runtime code still ships as a single esbuild bundle with zero
+third-party imports (see [The VS Code extension](#the-vs-code-extension)).

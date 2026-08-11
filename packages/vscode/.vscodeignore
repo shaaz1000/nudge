@@ -1,0 +1,23 @@
+# Minor fix #6: this used to be a denylist (exclude src/**, test/**,
+# **/*.ts, dist/*.js, ...) built on the assumption that the esbuild bundle
+# is named dist/extension.cjs. That assumption is invisible here — nothing
+# enforces it — so changing esbuild's `--outfile` extension to `.js` (e.g.
+# to match this package's own `"type": "module"`) would make the bundle
+# ALSO match the `dist/*.js` exclusion meant only for tsc's per-module
+# output, and the .vsix would silently ship an empty `dist/`: a dead
+# extension that installs cleanly and does nothing (exactly the "green
+# tests, clean types, dead artifact" failure mode Finding I5 is about).
+#
+# An allowlist confines that coupling to ONE line that names the bundle
+# explicitly, instead of a denylist rule (`dist/*.js`) whose stated purpose
+# — excluding tsc's per-module output — has nothing to do with the bundle's
+# name, so nobody renaming `--outfile` would think to look here. A future
+# rename still needs this line updated too (no static ignore-file can
+# detect its own staleness), but `npm run package`'s own "Files included in
+# the VSIX" listing now makes an empty `dist/` immediately visible if it
+# isn't — and CI's own bundle-verification step (Finding I5) reads
+# dist/extension.cjs directly and fails loudly, rather than silently, if
+# that exact file is missing.
+**
+!package.json
+!dist/extension.cjs

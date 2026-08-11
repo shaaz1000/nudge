@@ -1,0 +1,53 @@
+{
+  "name": "nudge-vscode",
+  "displayName": "Nudge",
+  "description": "Brings the right VS Code window forward when a Claude Code session is waiting on you.",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "publisher": "nudge",
+  "categories": ["Other"],
+  "main": "./dist/extension.cjs",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "commands": [
+      { "command": "nudge.focusSession", "title": "Nudge: Go to Waiting Session" },
+      { "command": "nudge.snooze", "title": "Nudge: Snooze a Waiting Session" },
+      { "command": "nudge.mute", "title": "Nudge: Toggle Mute" },
+      { "command": "nudge.showList", "title": "Nudge: Show Waiting Sessions" }
+    ],
+    "configuration": {
+      "title": "Nudge",
+      "properties": {
+        "nudge.showToasts": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a toast notification when a Claude Code session starts waiting on you. When off, only the status bar item reflects it."
+        },
+        "nudge.socketPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Override the Nudge engine socket path. Leave empty to use the engine's default (honours NUDGE_HOME). Read only once, at activation — changing it takes effect on the next window reload, not live."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "bundle": "esbuild src/extension.ts --bundle --outfile=dist/extension.cjs --platform=node --format=cjs --external:vscode --target=node18",
+    "vscode:prepublish": "npm run bundle",
+    "package": "vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "@nudge/shared": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.21.5"
+  }
+}
