@@ -22,10 +22,10 @@ export function detectSurface(env: NodeJS.ProcessEnv): Surface {
   if (env.WT_SESSION) s.wtSession = env.WT_SESSION
   if (env.TMUX) s.tmux = true
   if (process.ppid) s.ppid = process.ppid
-  try {
-    const tty = process.stderr.isTTY ? String(process.stderr.fd) : undefined
-    if (tty) s.tty = tty
-  } catch { /* ignore */ }
+  // tty is deliberately NOT set here — see detectTtyPath's doc below for why
+  // (it used to be a literal `"2"`, and getting a REAL device path costs a
+  // process spawn this hot-path function must never pay for). Only
+  // detectSurfaceForHook adds it, gated to SessionStart.
   return s
 }
 
@@ -118,6 +118,90 @@ function defaultProbe(pid: number): ProcessInfo | null {
   return parsePsOutput(out)
 }
 
+// --- Amendment (review round 1, Finding 4 — USER-APPROVED): a real tty device path ---
+//
+// `detectSurface()` used to store `String(process.stderr.fd)` in `surface.tty` — the
+// literal `"2"` (stderr's fd NUMBER), never a device path. It looked like a real
+// value and never was one: packages/tray/src/focus.ts's terminal-focus AppleScript
+// compares `surface.tty` against Terminal.app/iTerm2's own `tty of t`/`tty of sess`
+// property, which is always a POSIX device path (e.g. `/dev/ttys002`) — a bare "2"
+// could never match that, so tty-based focus was silently dead for every session.
+//
+// Investigated what genuinely works on darwin (this task's actual target, though the
+// mechanism is identical on Linux): there is no Node core API for `ttyname(3)`, and
+// `fs.readlinkSync('/proc/self/fd/2')` (the Linux-only trick) does not apply on macOS
+// at all — macOS has no /proc. `/dev/fd/2` on macOS is itself a character-special
+// device node, not a symlink to one, so readlink on it fails (confirmed empirically:
+// `readlink /dev/fd/2` exits 1, "Not a symlink"). `process.stderr.isTTY` only tells you
+// whether fd 2 itself is a tty right now — which is frequently FALSE for a hook
+// subprocess even when it is genuinely running inside a real terminal session, because
+// Claude Code pipes the hook's stdio rather than inheriting the terminal's fds.
+//
+// What DOES work, verified empirically (see the task report for the exact transcript):
+// `ps -o tty= -p <pid>` reports the process's SESSION-level controlling terminal — a
+// property inherited through the process tree from the session leader (the shell
+// running inside Terminal.app/iTerm2), independent of whatever fd 0/1/2 happen to be
+// connected to right now. A grandchild process with stdio fully redirected to
+// /dev/null, spawned from a shell running inside a real pty, still reports that pty's
+// real device name via `ps -o tty=` (`ttys000`, needing a `/dev/` prefix to match what
+// AppleScript's `tty of t` returns) — exactly the shape of a piped-stdio hook
+// subprocess. A process with no controlling terminal at all prints `??`.
+//
+// Cost/safety, matching this file's existing `detectHostApp` conventions exactly:
+// POSIX-only (win32 has no `ps`, and `surface.tty` is only ever read on darwin — see
+// focus.ts's `terminalPlan`, so there is nothing to gain by attempting it there),
+// gated to SessionStart only (wired into `detectSurfaceForHook` below, never inside
+// `detectSurface` itself, so a hot-path hook like PreToolUse never pays for it),
+// bounded by the SAME `POSIX_HOP_TIMEOUT_MS`/shared `deadline` the host-app walk
+// already uses (a single non-looping call, so unlike the walk it cannot overshoot by
+// more than one hop's timeout regardless), always wrapped, never throws.
+
+export type TtyProbe = (pid: number) => string | null
+
+/**
+ * Parses `ps -o tty=` output into a full POSIX device path (`/dev/<name>`), or
+ * `undefined` when the process has no controlling terminal (`ps` prints `?`/`??`) or
+ * the output is empty/malformed. Exported so this gets real parsing coverage without
+ * spawning a real `ps`, mirroring `parsePsOutput`/`parsePowershellOutput` above.
+ */
+export function parseTtyOutput(out: string): string | undefined {
+  const name = out.trim()
+  if (!name || name === '?' || name === '??') return undefined
+  return `/dev/${name}`
+}
+
+/** Real probe: shells out to POSIX `ps` for one pid's controlling terminal. Never called
+ *  in a test — always injected (same convention as `defaultProbe` above). */
+function defaultTtyProbe(pid: number): string | null {
+  return execFileSync('ps', ['-o', 'tty=', '-p', String(pid)], {
+    timeout: POSIX_HOP_TIMEOUT_MS, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+  })
+}
+
+/**
+ * Real controlling-terminal device path for `pid` (default: this process), e.g.
+ * `/dev/ttys002` on macOS. Returns `undefined` — never throws — when there is no
+ * controlling terminal, on any probe failure/timeout, on Windows (no POSIX `ps`, and
+ * nothing reads `surface.tty` there anyway), or when `deadline` cannot be met (same
+ * "refuse to start unless it can finish in time" rule `detectHostApp` uses, sized to
+ * this being a single call rather than a loop — see the amendment above).
+ */
+export function detectTtyPath(
+  pid: number = process.pid,
+  probe: TtyProbe = defaultTtyProbe,
+  deadline: number = Date.now() + POSIX_HOP_TIMEOUT_MS,
+): string | undefined {
+  if (process.platform === 'win32') return undefined
+  if (Date.now() + POSIX_HOP_TIMEOUT_MS > deadline) return undefined
+  try {
+    const out = probe(pid)
+    if (out === null) return undefined
+    return parseTtyOutput(out)
+  } catch {
+    return undefined
+  }
+}
+
 const HOST_APP_PATTERN = /claude|code|cursor|windsurf/i
 
 function nameAndPath(comm: string): { name: string; path?: string } {
@@ -202,15 +286,27 @@ function kindFromAppName(name: string): SurfaceKind | null {
  * `deadline` (an absolute `Date.now()`-style timestamp) is forwarded to
  * `detectHostApp` as-is; see its doc comment for why the caller should derive
  * this from a process-wide budget rather than a fresh local one.
+ *
+ * `ttyProbe`/the real tty lookup (Finding 4) rides the exact same gate and the
+ * exact same shared `deadline` as the host-app walk — both are SessionStart-only,
+ * both cost a real process spawn, and running the tty probe FIRST means a slow
+ * `readStdin` upstream (bin.ts) shortens what's left for the walk, not the other
+ * way around, consistent with this whole file's "a slow phase shortens what's left
+ * for the phases after it" rule (see bin.ts's DEADLINE doc for the same principle
+ * one layer up).
  */
 export function detectSurfaceForHook(
   hook: string,
   env: NodeJS.ProcessEnv,
   probe: ProcessProbe = defaultProbe,
   deadline: number = Date.now() + WALK_DEADLINE_MS,
+  ttyProbe: TtyProbe = defaultTtyProbe,
 ): Surface {
   const surface = detectSurface(env)
   if (hook !== 'SessionStart') return surface
+
+  const tty = detectTtyPath(process.pid, ttyProbe, deadline)
+  if (tty) surface.tty = tty
 
   const app = detectHostApp(probe, deadline)
   if (!app) return surface

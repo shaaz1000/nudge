@@ -2,8 +2,9 @@ import { describe, it, expect, vi } from 'vitest'
 import {
   detectSurface, detectHostApp, detectSurfaceForHook,
   parsePsOutput, parsePowershellOutput,
+  parseTtyOutput, detectTtyPath,
   HOP_LIMIT, WALK_DEADLINE_MS, POSIX_HOP_TIMEOUT_MS, WINDOWS_HOP_TIMEOUT_MS,
-  type ProcessProbe,
+  type ProcessProbe, type TtyProbe,
 } from '../src/surface.js'
 
 describe('detectSurface', () => {
@@ -158,6 +159,85 @@ describe('parsePowershellOutput', () => {
   })
 })
 
+// --- Review round 1, Finding 4 (USER-APPROVED) ---
+// detectSurface() used to store `String(process.stderr.fd)` in `surface.tty` — the
+// literal "2" (a constant, not a device path — fd 2 is always stderr). This is the
+// replacement: a real `ps -o tty=`-backed probe, gated to SessionStart, POSIX-only,
+// never throwing. See surface.ts's own "Amendment" doc above detectTtyPath for the
+// full investigation (why /proc doesn't exist on darwin, why isTTY on fd 2 is not
+// the right signal, and the empirical proof that `ps -o tty=` reports the SESSION
+// controlling terminal correctly even with piped stdio).
+describe('parseTtyOutput', () => {
+  it('prefixes a real device name with /dev/, matching what AppleScript\'s `tty of t` reports', () => {
+    expect(parseTtyOutput('ttys002')).toBe('/dev/ttys002')
+  })
+
+  it('tolerates surrounding whitespace (ps pads its column output)', () => {
+    expect(parseTtyOutput('  ttys002  \n')).toBe('/dev/ttys002')
+  })
+
+  it('parses a Linux-shaped pty name the same way', () => {
+    expect(parseTtyOutput('pts/0')).toBe('/dev/pts/0')
+  })
+
+  it('returns undefined (never throws) for "no controlling terminal" (`?`/`??`) or empty output', () => {
+    expect(parseTtyOutput('??')).toBeUndefined()
+    expect(parseTtyOutput('?')).toBeUndefined()
+    expect(parseTtyOutput('')).toBeUndefined()
+    expect(parseTtyOutput('   ')).toBeUndefined()
+  })
+})
+
+describe('detectTtyPath', () => {
+  it('returns the parsed device path from an injected probe', () => {
+    const probe: TtyProbe = () => 'ttys003'
+    expect(detectTtyPath(123, probe)).toBe('/dev/ttys003')
+  })
+
+  it('returns undefined when the probe reports no controlling terminal', () => {
+    const probe: TtyProbe = () => '??'
+    expect(detectTtyPath(123, probe)).toBeUndefined()
+  })
+
+  it('returns undefined rather than throwing when the probe throws (missing ps, timeout, etc.)', () => {
+    const probe: TtyProbe = () => { throw new Error('ENOENT: ps not found') }
+    expect(() => detectTtyPath(123, probe)).not.toThrow()
+    expect(detectTtyPath(123, probe)).toBeUndefined()
+  })
+
+  it('returns undefined rather than throwing when the probe returns null', () => {
+    const probe: TtyProbe = () => null
+    expect(detectTtyPath(123, probe)).toBeUndefined()
+  })
+
+  it('never calls the probe on win32 — there is no POSIX `ps`, and nothing reads surface.tty there anyway', () => {
+    const probe = vi.fn((_pid: number): string | null => 'ttys000')
+    const original = process.platform
+    Object.defineProperty(process, 'platform', { value: 'win32' })
+    try {
+      expect(detectTtyPath(123, probe)).toBeUndefined()
+      expect(probe).not.toHaveBeenCalled()
+    } finally {
+      Object.defineProperty(process, 'platform', { value: original })
+    }
+  })
+
+  // Same "refuse to start unless it can finish in time" rule detectHostApp's walk
+  // uses (review round 1 of an earlier task) — sized for a single call rather than
+  // a loop, so unlike the walk it cannot overshoot by more than one hop's timeout
+  // even without this guard, but the guard still means it never even tries.
+  it('never calls the probe once the deadline cannot be met', () => {
+    const probe = vi.fn((_pid: number): string | null => 'ttys000')
+    expect(detectTtyPath(123, probe, Date.now() - 1)).toBeUndefined()
+    expect(probe).not.toHaveBeenCalled()
+  })
+
+  it('warns callers (via this test itself) that omitting the probe spawns a real ps — always inject in tests', () => {
+    // Mirrors detectHostApp's identical documented convention just above.
+    expect(() => detectTtyPath()).not.toThrow()
+  })
+})
+
 describe('detectSurfaceForHook', () => {
   it('never invokes the process-probe walk for a hook other than SessionStart', () => {
     const probe = vi.fn()
@@ -168,21 +248,48 @@ describe('detectSurfaceForHook', () => {
 
   it('invokes the walk only for SessionStart', () => {
     const probe = vi.fn(() => null)
-    detectSurfaceForHook('SessionStart', {}, probe)
+    detectSurfaceForHook('SessionStart', {}, probe, undefined, () => null)
     expect(probe).toHaveBeenCalled()
   })
 
   it('lets an env-var match take precedence over a process-walk match, but still records the app', () => {
     const probe = vi.fn(() => ({ ppid: 1, comm: '/Applications/Claude.app/Contents/MacOS/Claude' }))
-    const s = detectSurfaceForHook('SessionStart', { TERM_PROGRAM: 'vscode' }, probe)
+    const s = detectSurfaceForHook('SessionStart', { TERM_PROGRAM: 'vscode' }, probe, undefined, () => null)
     expect(s.kind).toBe('vscode')
     expect(s.app?.name).toBe('Claude')
   })
 
   it('falls back to the process-walk kind only when the env vars left it unknown', () => {
     const probe = vi.fn(() => ({ ppid: 1, comm: '/Applications/Claude.app/Contents/MacOS/Claude' }))
-    const s = detectSurfaceForHook('SessionStart', {}, probe)
+    const s = detectSurfaceForHook('SessionStart', {}, probe, undefined, () => null)
     expect(s.kind).toBe('desktop')
     expect(s.app?.name).toBe('Claude')
+  })
+
+  describe('tty wiring (Finding 4)', () => {
+    it('never invokes the tty probe for a hook other than SessionStart', () => {
+      const ttyProbe = vi.fn((_pid: number): string | null => 'ttys000')
+      const s = detectSurfaceForHook('PreToolUse', {}, () => null, undefined, ttyProbe)
+      expect(ttyProbe).not.toHaveBeenCalled()
+      expect(s.tty).toBeUndefined()
+    })
+
+    it('records a real device path on SessionStart when the tty probe finds one', () => {
+      const s = detectSurfaceForHook('SessionStart', {}, () => null, undefined, () => 'ttys004')
+      expect(s.tty).toBe('/dev/ttys004')
+    })
+
+    it('leaves tty absent (not a misleading fallback value) when the tty probe finds no controlling terminal', () => {
+      const s = detectSurfaceForHook('SessionStart', {}, () => null, undefined, () => '??')
+      expect(s.tty).toBeUndefined()
+    })
+
+    it('a throwing tty probe does not prevent the rest of surface detection (env vars, host-app walk) from completing', () => {
+      const probe = vi.fn(() => ({ ppid: 1, comm: '/Applications/Claude.app/Contents/MacOS/Claude' }))
+      const ttyProbe: TtyProbe = () => { throw new Error('ENOENT') }
+      const s = detectSurfaceForHook('SessionStart', {}, probe, undefined, ttyProbe)
+      expect(s.tty).toBeUndefined()
+      expect(s.app?.name).toBe('Claude')
+    })
   })
 })
