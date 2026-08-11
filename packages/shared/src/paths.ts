@@ -3,13 +3,23 @@ import { createHash } from 'node:crypto'
 import { join, resolve } from 'node:path'
 
 export function nudgeHome(): string {
-  return process.env.NUDGE_HOME ?? join(homedir(), '.nudge')
+  // `||`, not `??`: an explicitly-set but empty NUDGE_HOME (e.g. a shell
+  // wrapper that exports `NUDGE_HOME=` with nothing after the `=`) must fall
+  // back to the default too. With `??`, '' is neither null nor undefined, so
+  // every derived path (configPath, dbPath, socketPath, ...) would resolve
+  // relative to the current working directory instead — and a launchd
+  // daemon's cwd is `/`, so this silently pointed the engine at `/nudge.db`,
+  // `/config.json`, etc. on the one platform (macOS + launchd) Nudge ships a
+  // service unit for.
+  return process.env.NUDGE_HOME || join(homedir(), '.nudge')
 }
 
 export function configPath(): string { return join(nudgeHome(), 'config.json') }
 export function spoolDir(): string { return join(nudgeHome(), 'spool') }
 export function dbPath(): string { return join(nudgeHome(), 'nudge.db') }
 export function channelsDir(): string { return join(nudgeHome(), 'channels') }
+/** Single-instance guard (finding C2) — see packages/engine/src/lock.ts. */
+export function lockPath(): string { return join(nudgeHome(), 'engine.lock') }
 
 /**
  * Named pipes on Windows are a flat, per-machine namespace with no

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { performance } from 'node:perf_hooks'
 import { loadConfig } from '@nudge/shared/config'
+import { lockPath } from '@nudge/shared/paths'
 import { loadChannels } from '@nudge/channels'
 import { SystemClock } from './clock.js'
 import { SessionStore } from './state.js'
@@ -13,6 +14,7 @@ import { Db } from './db.js'
 import { Engine } from './engine.js'
 import { drainSpool } from './drain.js'
 import { DriftDetector } from './drift.js'
+import { acquireLock } from './lock.js'
 
 /**
  * Finding C1 (part 3): the last unguarded path. Every handler this daemon
@@ -31,6 +33,18 @@ process.on('uncaughtException', err => {
 process.on('unhandledRejection', err => {
   console.error('nudge engine: unhandled rejection', err)
 })
+
+// Finding C2: exclusive single-instance guard. Must run before anything else
+// touches the socket, the DB, or the watchdog/escalation timers — a second
+// engine process for the same NUDGE_HOME exits here, quietly and cleanly,
+// before any of that state exists. See lock.ts for why this is race-free
+// and why a stale lock (holder no longer alive) is reclaimed rather than
+// left to brick the engine forever after one crash.
+const lock = acquireLock(lockPath())
+if (!lock) {
+  console.error('nudge engine: another engine instance is already running for this NUDGE_HOME; exiting.')
+  process.exit(0)
+}
 
 const cfg = loadConfig()
 const clock = new SystemClock()
@@ -78,5 +92,5 @@ await engine.start()
 await drainSpool(ev => engine.handle(ev))
 
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
-  process.on(sig, () => { void engine.stop().then(() => process.exit(0)) })
+  process.on(sig, () => { void engine.stop().then(() => { lock.release(); process.exit(0) }) })
 }

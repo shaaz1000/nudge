@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { userInfo } from 'node:os'
+import { homedir, userInfo } from 'node:os'
 import { join } from 'node:path'
-import { nudgeHome, socketPath, configPath, spoolDir, dbPath } from '../src/paths.js'
+import { nudgeHome, socketPath, configPath, spoolDir, dbPath, lockPath } from '../src/paths.js'
 
 describe('paths', () => {
   const original = process.env.NUDGE_HOME
@@ -16,12 +16,28 @@ describe('paths', () => {
     expect(configPath()).toBe(join('/tmp/nudge-test-home', 'config.json'))
     expect(spoolDir()).toBe(join('/tmp/nudge-test-home', 'spool'))
     expect(dbPath()).toBe(join('/tmp/nudge-test-home', 'nudge.db'))
+    expect(lockPath()).toBe(join('/tmp/nudge-test-home', 'engine.lock'))
   })
 
   it('produces a platform-appropriate socket path', () => {
     const p = socketPath()
     if (process.platform === 'win32') expect(p).toMatch(/^\\\\[.]\\pipe\\nudge-/)
     else expect(p).toBe(join('/tmp/nudge-test-home', 'engine.sock'))
+  })
+
+  /**
+   * Small fix from the review triage: `nudgeHome()` used to read
+   * `process.env.NUDGE_HOME ?? join(homedir(), '.nudge')`. An explicitly-set
+   * but empty NUDGE_HOME (`NUDGE_HOME=`) is neither null nor undefined, so
+   * `??` did not fall back — every derived path silently resolved relative
+   * to the current working directory instead of the intended default. A
+   * launchd daemon's cwd is `/`, so this pointed the engine at `/nudge.db`
+   * rather than `~/.nudge/nudge.db`.
+   */
+  it('falls back to the default home when NUDGE_HOME is set but empty', () => {
+    process.env.NUDGE_HOME = ''
+    expect(nudgeHome()).toBe(join(homedir(), '.nudge'))
+    expect(configPath()).toBe(join(homedir(), '.nudge', 'config.json'))
   })
 })
 
