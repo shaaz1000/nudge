@@ -77,7 +77,7 @@ describe('StatusBar', () => {
     expect(item.backgroundColor).toBeUndefined()
   })
 
-  it('one or more waiting: warning background, bell-dot with the count, tooltip lists each session', () => {
+  it('one or more waiting: warning background, bell-dot with the count, tooltip lists each session, tier, AND how long it has waited', () => {
     const item = makeItem()
     const bar = new StatusBar(makeSurface(item))
     const sessions = [
@@ -93,6 +93,12 @@ describe('StatusBar', () => {
     expect(item.tooltip).toContain('blocked')
     expect(item.tooltip).toContain('repo-two')
     expect(item.tooltip).toContain('stalled')
+    // Finding I4: the plan requires tier AND how long it has waited. Nothing
+    // above asserts the elapsed time itself — a mutation that replaced the
+    // real duration with `formatWaitDuration(0)` (every session reading
+    // "waiting 0s") left this test green. repo-one's fixture is 65s old,
+    // which formatWaitDuration renders as '1m'.
+    expect(item.tooltip).toContain('1m')
   })
 
   it('one waiting session: count suffix is still present (N=1)', () => {
@@ -123,6 +129,39 @@ describe('StatusBar', () => {
     expect(item.text).toBe('$(bell-dot) Nudge 1')
     expect(item.tooltip).toContain('waiting-repo')
     expect(item.tooltip).not.toContain('running-repo')
+  })
+
+  // Minor fix #2: "Snooze 10m" used to produce no visible change here — the
+  // count and warning colour persisted because neither read `snoozedUntil`.
+  // A currently-snoozed session (tier still non-null; snoozing doesn't clear
+  // it — see packages/engine/src/suppression.ts) must not count as waiting.
+  it('excludes a currently-snoozed session from the count, background color, and tooltip', () => {
+    const item = makeItem()
+    const bar = new StatusBar(makeSurface(item))
+    const mine = [
+      session({ sessionId: 's1', project: 'snoozed-repo', tier: 'blocked', snoozedUntil: Date.now() + 600_000 }),
+    ]
+
+    bar.render(mine, true)
+
+    expect(item.text).toBe('$(bell) Nudge')
+    expect(item.tooltip).toBe('Nothing waiting')
+    expect(item.backgroundColor).toBeUndefined()
+  })
+
+  // A snooze that has already expired (snoozedUntil in the past) must count
+  // again — snoozedUntil is not a permanent exclusion, just a timed one.
+  it('counts a session again once its snooze has expired', () => {
+    const item = makeItem()
+    const bar = new StatusBar(makeSurface(item))
+    const mine = [
+      session({ sessionId: 's1', project: 'was-snoozed-repo', tier: 'blocked', snoozedUntil: Date.now() - 1_000 }),
+    ]
+
+    bar.render(mine, true)
+
+    expect(item.text).toBe('$(bell-dot) Nudge 1')
+    expect(item.tooltip).toContain('was-snoozed-repo')
   })
 
   it('nothing waiting even when `mine` is non-empty, because every session in it is currently running', () => {

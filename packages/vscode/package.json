@@ -9,8 +9,7 @@
   "categories": ["Other"],
   "main": "./dist/extension.cjs",
   "engines": {
-    "vscode": "^1.85.0",
-    "node": ">=22.5.0"
+    "vscode": "^1.85.0"
   },
   "activationEvents": ["onStartupFinished"],
   "contributes": {
@@ -31,7 +30,8 @@
         "nudge.socketPath": {
           "type": "string",
           "default": "",
-          "description": "Override the Nudge engine socket path. Leave empty to use the engine's default (honours NUDGE_HOME)."
+          "scope": "machine",
+          "description": "Override the Nudge engine socket path. Leave empty to use the engine's default (honours NUDGE_HOME). Read only once, at activation — changing it takes effect on the next window reload, not live."
         }
       }
     }
@@ -39,13 +39,15 @@
   "scripts": {
     "build": "tsc --build",
     "bundle": "esbuild src/extension.ts --bundle --outfile=dist/extension.cjs --platform=node --format=cjs --external:vscode --target=node18",
-    "vscode:prepublish": "npm run bundle"
+    "vscode:prepublish": "npm run bundle",
+    "package": "vsce package --no-dependencies"
   },
   "dependencies": {
     "@nudge/shared": "0.1.0"
   },
   "devDependencies": {
     "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.9.2",
     "esbuild": "^0.21.5"
   }
 }

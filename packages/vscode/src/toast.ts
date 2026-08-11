@@ -75,11 +75,24 @@ export class Toaster {
   update(mine: SessionState[]): void {
     if (this.#disposed) return
 
-    const waitingIds = new Set(mine.filter(s => s.tier !== null).map(s => s.sessionId))
+    // Minor fix #2: a snooze doesn't clear `tier` server-side — it's a
+    // separate suppression overlay (see
+    // packages/engine/src/suppression.ts's `'snoozed'` reason) — so without
+    // this, "Snooze 10m" produced no visible change here either. Treating a
+    // currently-snoozed session as not-waiting for BOTH the de-dup-clearing
+    // set below AND the toast-eligibility loop (not just one or the other)
+    // matters: excluding it from only the clearing set would immediately
+    // drop its #toasted tracking and then re-toast it in the very same
+    // update() — the opposite of "no visible change".
+    const now = Date.now()
+    const isWaiting = (s: SessionState): boolean =>
+      s.tier !== null && (s.snoozedUntil === null || now >= s.snoozedUntil)
+    const waitingIds = new Set(mine.filter(isWaiting).map(s => s.sessionId))
     // Clear-on-resolve: drop tracking for any session this update no longer
-    // reports as waiting, so it toasts again if it re-blocks later. Iterating
-    // and deleting from the same Set is well-defined in JS — a Set iterator
-    // is unaffected by deletions of entries already visited or not yet due.
+    // reports as waiting, so it toasts again if it re-blocks later (or, per
+    // the fix above, once a snooze on it expires). Iterating and deleting
+    // from the same Set is well-defined in JS — a Set iterator is
+    // unaffected by deletions of entries already visited or not yet due.
     for (const id of this.#toasted) {
       if (!waitingIds.has(id)) this.#toasted.delete(id)
     }
@@ -87,7 +100,7 @@ export class Toaster {
     const showToasts = this.#surface.getConfiguration('nudge').get('showToasts', true)
 
     for (const s of mine) {
-      if (s.tier === null) continue
+      if (!isWaiting(s)) continue
       if (this.#toasted.has(s.sessionId)) continue
       // Marked toasted regardless of the showToasts setting: flipping the
       // setting on mid-wait must not cause an immediate backlog of toasts
@@ -99,7 +112,11 @@ export class Toaster {
 
   #show(s: SessionState): void {
     const tier = s.tier as Tier // non-null: only called from the `s.tier === null` guarded loop above
-    const message = `${s.project}: ${s.message ?? TIER_TEXT[tier]}`
+    // `||`, not `??` — matches desktop.ts's copy of this exact fallback
+    // (Minor fix #3). An empty-string `message` is falsy but not
+    // null/undefined; `??` would keep it (rendering nothing after the
+    // colon) where `||` correctly falls back to the tier text.
+    const message = `${s.project}: ${s.message || TIER_TEXT[tier]}`
     void Promise.resolve(this.#surface.showWarningMessage(message, 'Go to it', 'Snooze 10m')).then(choice => {
       // The user can dismiss or click an action well after this Toaster was
       // disposed (window closed, extension reloaded) — without this guard a

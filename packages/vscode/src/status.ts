@@ -103,7 +103,13 @@ export class StatusBar {
     // here (rather than trusting mine.length) matches Toaster's own
     // tier !== null check, since the composition root passes the identical
     // array to both.
-    const waiting = mine.filter(s => s.tier !== null)
+    //
+    // Minor fix #2: a snooze doesn't clear `tier` server-side (see
+    // packages/engine/src/suppression.ts's `'snoozed'` reason — it's a
+    // separate overlay, not a state change) — so without the `snoozedUntil`
+    // check, "Snooze 10m" produced no visible change here at all.
+    const now = Date.now()
+    const waiting = mine.filter(s => s.tier !== null && (s.snoozedUntil === null || now >= s.snoozedUntil))
 
     if (waiting.length === 0) {
       this.#item.text = '$(bell) Nudge'

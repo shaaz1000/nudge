@@ -40,6 +40,15 @@ export class EngineClient {
   #disposed = false
   #nextId = 1
   #connected = false
+  // Finding I1: the engine only ever broadcasts `state` on a *transition* —
+  // a client that subscribes into an already-stable state (e.g. a session
+  // that has been sitting `blocked` for the last ten minutes) never gets
+  // told about it. The wire protocol already has a `list` request for
+  // exactly this; this tracks the id of the one currently in flight so
+  // #onFrame can recognise its reply and treat it as an initial snapshot —
+  // fed to the very same `onState` listeners a `state` broadcast uses, so
+  // callers never need to know the difference.
+  #pendingListId: number | null = null
 
   constructor(opts: EngineClientOptions = {}) {
     this.#path = opts.path ?? socketPath()
@@ -93,6 +102,13 @@ export class EngineClient {
       this.#connected = true
       this.#backoffMs = this.#initialBackoffMs
       this.send({ t: 'subscribe', id: this.#nextId++ })
+      // Finding I1: `subscribe` alone only arms future broadcasts. Asking
+      // for `list` right behind it fills in whatever the engine is already
+      // holding — the fix for a client that connects (or reconnects) into a
+      // session that is already waiting and never changes again.
+      const listId = this.#nextId++
+      this.#pendingListId = listId
+      this.send({ t: 'list', id: listId })
     })
 
     sock.on('data', chunk => {
@@ -112,15 +128,36 @@ export class EngineClient {
     sock.on('close', () => {
       this.#connected = false
       this.#sock = null
+      // A reply to the OLD connection's `list` can never arrive now, and a
+      // stale id lingering here could — after enough id wraparound in a
+      // long-lived window — coincidentally match a later request. Cheap to
+      // clear, and removes any doubt.
+      this.#pendingListId = null
       if (!this.#disposed) this.#scheduleReconnect()
     })
   }
 
   #onFrame(msg: ServerMessage): void {
-    if (msg?.t !== 'state') return
+    if (msg?.t === 'state') {
+      this.#emit(msg.sessions)
+      return
+    }
+    // Finding I1: the reply to the `list` request sent right after
+    // `subscribe` (see the 'connect' handler above) is indistinguishable on
+    // the wire from any other `ok` reply except by its id — this is that
+    // recognition. Treated identically to a `state` broadcast from here on:
+    // every `onState` listener gets it, so StatusBar/Toaster/extension.ts
+    // never need their own separate "initial snapshot" code path.
+    if (msg?.t === 'ok' && this.#pendingListId !== null && msg.id === this.#pendingListId) {
+      this.#pendingListId = null
+      this.#emit((msg.data ?? []) as SessionState[])
+    }
+  }
+
+  #emit(sessions: SessionState[]): void {
     for (const cb of this.#listeners) {
       try {
-        cb(msg.sessions)
+        cb(sessions)
       } catch (err) {
         console.error('nudge vscode: onState listener threw', err)
       }

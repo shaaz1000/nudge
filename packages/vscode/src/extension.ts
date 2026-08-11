@@ -104,7 +104,20 @@ export function activate(context: vscode.ExtensionContext, deps: ActivateDeps = 
   // (see status.ts) — without this, the item sits blank (no icon at all,
   // not even the "unreachable" one) until the first broadcast or the first
   // poll tick, up to CONNECTIVITY_POLL_MS later.
-  statusBar.render([], client.connected)
+  //
+  // Finding I1: this used to render `client.connected` here — but a fresh
+  // `EngineClient` always starts out `connected === false` (it hasn't tried
+  // yet; `client.connect()` below hasn't even run, and is async regardless).
+  // That painted "$(bell-slash) Nudge — the engine is not running" on every
+  // single activation and window reload, for however long the real connect
+  // + subscribe + list round trip takes — wrongly, since the engine is
+  // usually fine. Seeded neutrally instead (as if reachable with nothing
+  // waiting): the very next real signal — the list-derived initial snapshot
+  // via `onState` below, a live broadcast, or the connectivity poll — always
+  // arrives well before a person could act on a false reading, and unlike
+  // `client.connected` at this exact instant, actually reflects something
+  // that happened.
+  statusBar.render([], true)
 
   let nextId = 1
   let mine: SessionState[] = []
@@ -112,16 +125,24 @@ export function activate(context: vscode.ExtensionContext, deps: ActivateDeps = 
   let allWaiting: SessionState[] = []
   let windowFocused = surface.isWindowFocused()
 
-  // Only ever called while windowFocused is true from the loss branch's
-  // perspective too — see the two call sites below. Sending unconditionally
-  // on loss (even if this window never owned anything) is deliberate and
-  // harmless: it is idempotent from the engine's point of view, and it is
-  // the only way a window that stops owning anything still clears whatever
-  // it last reported.
+  // Finding I2: the engine holds ONE global frontmost, not one per window.
+  // Tracks the id THIS window most recently told the engine it owns, so the
+  // blur branch below can tell "I reported something and need to clear it"
+  // apart from "I never reported anything, so there is nothing of mine to
+  // clear" — sending `{sessionId: null}` unconditionally on every blur
+  // (including from a window that never owned a waiting session) would
+  // clobber whatever a DIFFERENT window had legitimately just claimed. This
+  // was NOT idempotent from the engine's point of view, despite the comment
+  // that used to sit here.
+  let lastReportedFrontmostId: string | null = null
+
   function reportFrontmostOnFocusChange(focused: boolean): void {
     windowFocused = focused
     if (!windowFocused) {
-      client.send({ t: 'frontmost', sessionId: null })
+      if (lastReportedFrontmostId !== null) {
+        client.send({ t: 'frontmost', sessionId: null })
+        lastReportedFrontmostId = null
+      }
       return
     }
     reportFrontmostIfFocused()
@@ -134,7 +155,10 @@ export function activate(context: vscode.ExtensionContext, deps: ActivateDeps = 
   function reportFrontmostIfFocused(): void {
     if (!windowFocused) return
     const candidate = mineWaiting[0]?.sessionId ?? null
-    if (candidate !== null) client.send({ t: 'frontmost', sessionId: candidate })
+    if (candidate !== null) {
+      client.send({ t: 'frontmost', sessionId: candidate })
+      lastReportedFrontmostId = candidate
+    }
   }
 
   client.onState(sessions => {
@@ -201,11 +225,19 @@ export function activate(context: vscode.ExtensionContext, deps: ActivateDeps = 
     client.send({ t: 'snooze', id: nextId++, sessionId: target.sessionId, ms: SNOOZE_MS })
   })
 
+  // `muted` is a fresh local `false` on every activation, and there is no
+  // readback of the engine's actual muted flag (that needs a wire-protocol
+  // change — deferred). So this toggle can genuinely diverge from reality:
+  // a user who muted via `nudge mute` on the CLI, then reloads this window,
+  // has this extension start believing it's unmuted regardless. The message
+  // below deliberately describes what THIS click just asked the engine to
+  // do, not a confident claim about the resulting server-side state this
+  // extension has no way to verify.
   let muted = false
   const cmdMute = surface.registerCommand('nudge.mute', () => {
     muted = !muted
     client.send({ t: 'mute', id: nextId++, on: muted })
-    void surface.showInformationMessage(muted ? 'Nudge: muted.' : 'Nudge: unmuted.')
+    void surface.showInformationMessage(muted ? 'Nudge: requested mute.' : 'Nudge: requested unmute.')
   })
 
   // Lists every waiting session system-wide, not only this window's — the

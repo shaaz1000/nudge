@@ -164,16 +164,41 @@ describe('activate: rendering', () => {
   // StatusBar's own constructor never calls render() (see status.ts) — without
   // an explicit initial render, the item would sit blank (no icon at all,
   // not even the "unreachable" one) until the first broadcast or the first
-  // poll tick, which could be seconds away.
-  it('renders an immediate initial status — synchronously, before any broadcast or poll tick — reflecting not-yet-connected', () => {
+  // poll tick, which could be seconds away. But — Finding I1 — a fresh
+  // `EngineClient` always starts with `connected === false` (it hasn't tried
+  // yet; `client.connect()` is only called at the end of activate(), and is
+  // async even then). Rendering THAT value synchronously used to paint
+  // "$(bell-slash) Nudge — The Nudge engine is not running" before any
+  // connection attempt had even started, let alone failed. This is now a
+  // neutral initial paint instead: it must NOT claim the engine is down
+  // before a real attempt has resolved one way or the other.
+  it('renders an immediate initial status — synchronously, before any broadcast or poll tick — without claiming the engine is down before any attempt has resolved', () => {
     const { client } = makeClient()
-    client.connected = false
+    client.connected = false // fresh client: hasn't attempted to connect yet
     const { surface } = makeSurface()
     const { context } = makeContext()
 
     activate(context, { client, surface, pollIntervalMs: 60_000 })
 
-    expect(statusBarItem.text).toBe('$(bell-slash) Nudge')
+    expect(statusBarItem.text).not.toBe('$(bell-slash) Nudge')
+  })
+
+  // Companion to the test above: the neutral seed must still be a real,
+  // correctable placeholder, not a state nothing can move on from. A stale
+  // `client.connected` read is exactly what production activate() has
+  // available synchronously — this proves genuine information (a broadcast,
+  // here standing in for the list-snapshot / poll paths) still overrides it.
+  it('the neutral initial paint is corrected by the first real broadcast, connected or not', () => {
+    const { client, emit } = makeClient()
+    client.connected = false
+    const { surface } = makeSurface({ folders: ['/a/my-repo'] })
+    const { context } = makeContext()
+
+    activate(context, { client, surface, pollIntervalMs: 60_000 })
+    client.connected = true
+    emit([session({ sessionId: 's1', cwd: '/a/my-repo' })])
+
+    expect(statusBarItem.text).toBe('$(bell-dot) Nudge 1')
   })
 
   it('renders the status bar and toasts from sessionsForWindow(sessions, folders), not the raw broadcast', () => {
@@ -285,6 +310,54 @@ describe('activate: frontmost reporting', () => {
     emit([session({ sessionId: 's1', cwd: '/a/my-repo', tier: 'blocked' })])
 
     expect(sent).toContainEqual({ t: 'frontmost', sessionId: 's1' })
+  })
+
+  // Finding I2: the engine holds ONE global frontmost, not one per window.
+  // A window that never reported a non-null frontmost (because it never
+  // owned a waiting session while focused) must not send `{sessionId: null}`
+  // on blur either — doing so unconditionally would clear whatever a
+  // DIFFERENT, legitimately-reporting window had just claimed.
+  it('does not send {t:"frontmost", sessionId: null} on blur if this window never reported a non-null frontmost in the first place', () => {
+    const { client, sent } = makeClient()
+    const { surface, fireWindowState } = makeSurface({ folders: ['/b/unrelated'], focused: true })
+    const { context } = makeContext()
+
+    activate(context, { client, surface })
+    // No emit(): this window never owns anything, so it never sent a
+    // non-null frontmost report — there is nothing here for it to clear.
+
+    fireWindowState(false)
+
+    expect(sent).toHaveLength(0)
+  })
+
+  // Two-window interleaving, the scenario the finding actually describes:
+  // window A owns a waiting session and is the one legitimately reporting
+  // frontmost. Window B is a completely separate window (different
+  // workspace, different EngineClient/socket in the real world, but here
+  // driven through its own activate()) that never owns anything. B losing
+  // focus — e.g. the user briefly alt-tabbed to it and back — must not
+  // touch the engine's frontmost pointer at all, let alone clear A's claim.
+  it('two-window interleaving: window B blurring never sends anything, so it cannot clobber window A\'s legitimate frontmost claim', () => {
+    const { client: clientA, emit: emitA, sent: sentA } = makeClient()
+    const { surface: surfaceA, fireWindowState: fireA } = makeSurface({ folders: ['/a/my-repo'], focused: false })
+    const { context: contextA } = makeContext()
+    activate(contextA, { client: clientA, surface: surfaceA })
+    emitA([session({ sessionId: 'sA', cwd: '/a/my-repo' })])
+    fireA(true)
+    expect(sentA).toContainEqual({ t: 'frontmost', sessionId: 'sA' })
+    deactivate()
+
+    const { client: clientB, sent: sentB } = makeClient()
+    const { surface: surfaceB, fireWindowState: fireB } = makeSurface({ folders: ['/b/unrelated'], focused: true })
+    const { context: contextB } = makeContext()
+    activate(contextB, { client: clientB, surface: surfaceB })
+
+    fireB(false)
+
+    // B never claimed anything: on the real (single global frontmost)
+    // engine, this must not clear A's still-valid claim above.
+    expect(sentB).toHaveLength(0)
   })
 })
 
@@ -459,6 +532,30 @@ describe('nudge.snooze command', () => {
 
     expect(showQuickPick).toHaveBeenCalledTimes(1)
     expect(sent).toContainEqual(expect.objectContaining({ t: 'snooze', sessionId: 's2', ms: 600_000 }))
+  })
+
+  // I4 mutation coverage: `allWaiting` (used by both nudge.snooze and
+  // nudge.showList's no-arg fallback) must filter to `tier !== null` — a
+  // mutation that dropped the filter (allWaiting = sessions verbatim) left
+  // every other test in this file green because they only ever emit
+  // already-waiting sessions. Mixing in a non-waiting one is what exposes
+  // it: with the filter, exactly one session qualifies (no prompt needed);
+  // without it, two "waiting" sessions would trigger a quick pick instead.
+  it('allWaiting excludes sessions with tier: null, not just the ones nudge.showList happens to be fed', async () => {
+    const { client, emit, sent } = makeClient()
+    const { surface, invoke, showQuickPick } = makeSurface()
+    const { context } = makeContext()
+
+    activate(context, { client, surface })
+    emit([
+      session({ sessionId: 'not-waiting', tier: null, status: 'running', waitingSince: null }),
+      session({ sessionId: 'waiting', tier: 'blocked' }),
+    ])
+
+    await invoke('nudge.snooze')
+
+    expect(showQuickPick).not.toHaveBeenCalled()
+    expect(sent).toContainEqual(expect.objectContaining({ t: 'snooze', sessionId: 'waiting', ms: 600_000 }))
   })
 })
 

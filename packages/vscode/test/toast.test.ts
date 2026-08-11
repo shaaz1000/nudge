@@ -58,6 +58,21 @@ describe('Toaster', () => {
     expect(messages[0]).toContain('my-repo')
   })
 
+  // Minor fix #3: toast.ts used `??` here where desktop.ts's copy of the
+  // exact same fallback logic uses `||` — latent drift on an already-
+  // duplicated block. The only case where they disagree is an empty-string
+  // message (`??` keeps `''`, `||` falls back to TIER_TEXT): a session
+  // whose `message` is `''` (falsy, not null/undefined) must show the tier
+  // text, not a message that renders as nothing after the colon.
+  it('falls back to tier text for a falsy empty-string message, matching desktop.ts\'s || (not ??)', () => {
+    const { surface, messages } = makeSurface()
+    const toaster = new Toaster(vi.fn(), surface)
+
+    toaster.update([session({ message: '' })])
+
+    expect(messages[0]).toContain('Waiting on you: permission or question')
+  })
+
   it('does not toast a session that is not waiting (tier: null)', () => {
     const { surface, messages } = makeSurface()
     const toaster = new Toaster(vi.fn(), surface)
@@ -98,6 +113,34 @@ describe('Toaster', () => {
     toaster.update([session()])
     toaster.update([])
     toaster.update([session()])
+
+    expect(messages).toHaveLength(2)
+  })
+
+  // Minor fix #2: a snooze doesn't clear `tier` server-side (it's a separate
+  // suppression overlay — see packages/engine/src/suppression.ts), so a
+  // just-snoozed session is still `tier !== null` on the very next update().
+  // Two things must both hold: no spurious extra toast the instant it's
+  // snoozed (it must NOT look "newly waiting" just because de-dup tracking
+  // forgot it), and it toasts again once the snooze naturally expires if
+  // it's still genuinely waiting then.
+  it('does not toast again the moment a still-waiting session becomes snoozed', () => {
+    const { surface, messages } = makeSurface()
+    const toaster = new Toaster(vi.fn(), surface)
+
+    toaster.update([session()]) // toasts once
+    toaster.update([session({ snoozedUntil: Date.now() + 600_000 })]) // now snoozed
+
+    expect(messages).toHaveLength(1)
+  })
+
+  it('toasts again once a snooze naturally expires, for a session that never stopped waiting', () => {
+    const { surface, messages } = makeSurface()
+    const toaster = new Toaster(vi.fn(), surface)
+
+    toaster.update([session()]) // toasts once
+    toaster.update([session({ snoozedUntil: Date.now() + 600_000 })]) // snoozed: no new toast
+    toaster.update([session({ snoozedUntil: Date.now() - 1_000 })]) // snooze expired, still waiting
 
     expect(messages).toHaveLength(2)
   })
@@ -155,6 +198,33 @@ describe('Toaster', () => {
 
     expect(messages).toHaveLength(0)
     expect(getConfiguration).toHaveBeenCalledWith('nudge')
+  })
+
+  // I4 mutation coverage: `#toasted.add()` runs regardless of the
+  // `showToasts` gate (see toast.ts's own doc on `update()`). A mutation
+  // that moved the `.add()` inside the `if (showToasts)` branch left every
+  // other test in this file green, because none of them flip the setting
+  // mid-wait for a session that was already silently tracked. This does
+  // exactly that: showToasts starts false (session waits silently, never
+  // toasted, but must still be TRACKED as toasted), then flips true while
+  // the SAME session is still waiting — it must not retroactively toast.
+  it('tracks a session as toasted even while showToasts is false, so flipping the setting on mid-wait does not backlog a toast', () => {
+    let showToasts = false
+    const messages: string[] = []
+    const surface: ToastSurface = {
+      showWarningMessage: (message: string) => { messages.push(message); return Promise.resolve(undefined) },
+      getConfiguration: () => ({ get: (_key: string, def: boolean) => showToasts ?? def }),
+      executeCommand: vi.fn(),
+    }
+    const toaster = new Toaster(vi.fn(), surface)
+
+    toaster.update([session()]) // showToasts false: silent, but must be tracked
+    expect(messages).toHaveLength(0)
+
+    showToasts = true
+    toaster.update([session()]) // same still-waiting session, setting now on
+
+    expect(messages).toHaveLength(0)
   })
 
   it('dispose() stops update() from toasting further', () => {
