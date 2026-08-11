@@ -7,6 +7,8 @@ import { nudgeHome } from '@nudge/shared/paths'
 import type { SessionState } from '@nudge/shared/types'
 import type { ClientMessage } from '@nudge/shared/protocol'
 import { NudgeTray, type TrayCallbacks } from './tray.js'
+import { Notifier } from './notify.js'
+import { focusSession } from './focus.js'
 
 // esbuild's CJS output (used for the real, runnable app — see package.json's
 // `bundle` script) zeroes out `import.meta` entirely ("import.meta is not
@@ -44,6 +46,12 @@ export type EngineClientLike = Pick<EngineClient, 'connected' | 'onState' | 'sen
 /** The subset of NudgeTray this module needs — lets tests inject a fake tray without touching Electron at all. */
 export interface TrayLike {
   render(sessions: SessionState[], connected: boolean): void
+  dispose(): void
+}
+
+/** The subset of Notifier this module needs — lets tests inject a fake notifier without touching Electron's real `Notification` at all. */
+export interface NotifierLike {
+  update(sessions: SessionState[]): void
   dispose(): void
 }
 
@@ -102,6 +110,24 @@ export interface MainDeps {
   appSurface?: AppSurface
   client?: EngineClientLike
   createTray?: (send: (msg: ClientMessage) => void, callbacks: TrayCallbacks) => TrayLike
+  /**
+   * Task 4's seam: builds the clickable-notification module. `onFocus` is
+   * the same callback wired to the tray's own per-session menu items
+   * (`TrayCallbacks.onFocusSession`) — a click on the OS notification and a
+   * click on the tray's context menu land on the exact same focus path.
+   * Defaults to a real `Notifier` (electron `Notification`); tests must
+   * always inject a fake here, never let a real one construct (see
+   * `EngineClientLike`'s identical warning above).
+   */
+  createNotifier?: (onFocus: (s: SessionState) => void) => NotifierLike
+  /**
+   * Task 5's seam: brings the right window forward for a session, from
+   * outside any editor. Defaults to the real `focusSession` (spawns
+   * `code`/`osascript`/etc., or falls back to the clipboard) — tests must
+   * always inject a fake, exactly like every other Electron-touching
+   * default on this interface.
+   */
+  focusSession?: (s: SessionState) => Promise<void> | void
   spawnEngine?: () => void
   openHistoryFolder?: (path: string) => void
   /** Overrides the connectivity poll interval — tests only; production always uses CONNECTIVITY_POLL_MS. */
@@ -152,15 +178,17 @@ export function main(deps: MainDeps = {}): void {
     const client: EngineClientLike = deps.client ?? new EngineClient()
     const spawnEngine = deps.spawnEngine ?? defaultSpawnEngine
     const openHistoryFolder = deps.openHistoryFolder ?? (path => { void shell.openPath(path) })
+    const focus = deps.focusSession ?? focusSession
 
     const callbacks: TrayCallbacks = {
       // Task 5's seam (see tray.ts's TrayCallbacks.onFocusSession doc): the
-      // tray has no editor API of its own yet. This is the one call site
-      // Task 5 replaces — nothing in tray.ts or main.ts's own wiring needs
-      // to change when it does.
-      onFocusSession: s => {
-        console.error(`nudge tray: focusSession not yet implemented (Phase 3 Task 5) — ${s.project} (${s.cwd})`)
-      },
+      // tray has no editor API of its own, so this delegates to focus.ts's
+      // per-surface dispatch (VS Code/Cursor/Windsurf, the Claude desktop
+      // app, Terminal.app/iTerm2, Windows Terminal, or a clipboard
+      // fallback). Also the exact callback Notifier's own click handler
+      // reaches (see below) — a click on the OS notification and a click
+      // on the tray's context menu land on the identical focus path.
+      onFocusSession: s => { void focus(s) },
       onStartEngine: () => spawnEngine(),
       onOpenHistoryFolder: () => openHistoryFolder(nudgeHome()),
       onQuit: () => surface.quit(),
@@ -170,6 +198,17 @@ export function main(deps: MainDeps = {}): void {
     const tray: TrayLike = deps.createTray
       ? deps.createTray(send, callbacks)
       : new NudgeTray(send, callbacks)
+
+    // Task 4's clickable-notification module. Wired to the SAME
+    // `callbacks.onFocusSession` the tray's own per-session menu items use
+    // (not a second, independent path to focus.ts) — see Notifier's class
+    // doc for the de-duplication contract and the double-notification
+    // decision (shipped live, `silent: true`, residual visual duplication
+    // against the engine's own osascript banner documented as a known,
+    // out-of-scope gap).
+    const notifier: NotifierLike = deps.createNotifier
+      ? deps.createNotifier(s => callbacks.onFocusSession(s))
+      : new Notifier(s => callbacks.onFocusSession(s))
 
     // NudgeTray's own constructor never calls render() (mirrors StatusBar —
     // see its doc) — without this, the icon would sit on whatever
@@ -186,6 +225,7 @@ export function main(deps: MainDeps = {}): void {
     client.onState(sessions => {
       lastSessions = sessions
       tray.render(sessions, client.connected)
+      notifier.update(sessions)
       const waiting = sessions.filter(s => s.tier !== null).length
       console.error(`nudge tray: state — ${waiting} waiting, connected=${client.connected}`)
     })
@@ -201,7 +241,7 @@ export function main(deps: MainDeps = {}): void {
 
     client.connect()
 
-    active = [client, tray, { dispose: () => clearInterval(pollTimer) }]
+    active = [client, tray, notifier, { dispose: () => clearInterval(pollTimer) }]
   })
 
   surface.onBeforeQuit(() => {

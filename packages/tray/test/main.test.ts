@@ -15,11 +15,18 @@ vi.mock('electron', () => ({
     on: vi.fn(),
   },
   shell: { openPath: vi.fn() },
+  // main.ts statically imports notify.ts/focus.ts (for their real, default
+  // production wiring), and both of those import `Notification`/`clipboard`
+  // from 'electron' at module load — so this mock must provide them even
+  // though every test below injects its own fake createNotifier/
+  // focusSession and never lets the real defaults run.
+  Notification: vi.fn(),
+  clipboard: { writeText: vi.fn() },
 }))
 
 import type { SessionState } from '@nudge/shared/types'
 import type { ClientMessage } from '@nudge/shared/protocol'
-import { main, type AppSurface, type EngineClientLike, type TrayLike } from '../src/main.js'
+import { main, type AppSurface, type EngineClientLike, type TrayLike, type NotifierLike } from '../src/main.js'
 
 const session = (over: Partial<SessionState> = {}): SessionState => ({
   sessionId: 's1', project: 'my-repo', cwd: '/a/my-repo',
@@ -56,6 +63,29 @@ function makeTray() {
     dispose,
   }
   return { tray, renders, dispose }
+}
+
+/**
+ * A fake NotifierLike, plus the `onFocus` callback main.ts's real
+ * `deps.createNotifier` factory is invoked with — captured here so a test
+ * can fire it directly and prove main.ts wired it to the exact same focus
+ * path as the tray's own `TrayCallbacks.onFocusSession` (Task 4/5's
+ * click-fires-focus chain, exercised at the main.ts wiring layer rather than
+ * inside Notifier or focus.ts themselves, which each have their own tests).
+ */
+function makeNotifier() {
+  const updates: SessionState[][] = []
+  const dispose = vi.fn()
+  const notifier: NotifierLike = {
+    update: sessions => { updates.push(sessions) },
+    dispose,
+  }
+  let capturedOnFocus: ((s: SessionState) => void) | null = null
+  const createNotifier = vi.fn((onFocus: (s: SessionState) => void) => {
+    capturedOnFocus = onFocus
+    return notifier
+  })
+  return { notifier, updates, dispose, createNotifier, fireOnFocus: (s: SessionState) => capturedOnFocus?.(s) }
 }
 
 /** A fully controllable fake AppSurface — every test injects one explicitly. */
@@ -98,8 +128,9 @@ describe('main: single-instance lock', () => {
     const { client } = makeClient()
     const { tray, renders } = makeTray()
     const createTray = vi.fn(() => tray)
+    const { createNotifier } = makeNotifier()
 
-    main({ appSurface: surface, client, createTray })
+    main({ appSurface: surface, client, createTray, createNotifier, focusSession: vi.fn() })
     // Give any wrongly-reached whenReady().then(...) a chance to run —
     // without this await, a buggy version that removed the guard could
     // still pass this test by coincidence (the .then() callback hadn't run
@@ -117,8 +148,9 @@ describe('main: single-instance lock', () => {
     const { client } = makeClient()
     const { tray } = makeTray()
     const createTray = vi.fn(() => tray)
+    const { createNotifier } = makeNotifier()
 
-    main({ appSurface: surface, client, createTray })
+    main({ appSurface: surface, client, createTray, createNotifier, focusSession: vi.fn() })
     resolveReady()
     await new Promise(r => setTimeout(r, 0))
 
@@ -133,8 +165,9 @@ describe('main: wiring', () => {
     const { surface, resolveReady } = makeSurface()
     const { client, emit } = makeClient()
     const { tray, renders } = makeTray()
+    const { createNotifier } = makeNotifier()
 
-    main({ appSurface: surface, client, createTray: () => tray })
+    main({ appSurface: surface, client, createTray: () => tray, createNotifier, focusSession: vi.fn() })
     resolveReady()
     await new Promise(r => setTimeout(r, 0))
 
@@ -153,12 +186,80 @@ describe('main: wiring', () => {
     const { surface, resolveReady } = makeSurface()
     const { client } = makeClient()
     const { tray } = makeTray()
+    const { createNotifier } = makeNotifier()
 
-    main({ appSurface: surface, client, createTray: () => tray })
+    main({ appSurface: surface, client, createTray: () => tray, createNotifier, focusSession: vi.fn() })
     resolveReady()
     await new Promise(r => setTimeout(r, 0))
 
     expect(client.connect).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('main: notifier wiring (Task 4)', () => {
+  it('calls notifier.update(sessions) on every broadcast, with the exact sessions broadcast', async () => {
+    const { surface, resolveReady } = makeSurface()
+    const { client, emit } = makeClient()
+    const { tray } = makeTray()
+    const { createNotifier, updates } = makeNotifier()
+
+    main({ appSurface: surface, client, createTray: () => tray, createNotifier, focusSession: vi.fn() })
+    resolveReady()
+    await new Promise(r => setTimeout(r, 0))
+
+    const s = session({ sessionId: 's9' })
+    emit([s])
+
+    expect(updates[updates.length - 1]).toEqual([s])
+  })
+
+  // The full click-fires-focus chain, exercised at the wiring layer: a click
+  // on the OS notification calls Notifier's `onFocus` (see notify.test.ts
+  // for that half); main.ts must hand Notifier the SAME callback the tray's
+  // own context-menu items use (TrayCallbacks.onFocusSession), which in turn
+  // must call the injected `focusSession` — not merely log, not a dead end.
+  // Deliberately removing `void focus(s)` from callbacks.onFocusSession (or
+  // wiring createNotifier to some other, disconnected callback) makes this
+  // go RED — see the task report for the exact command and output.
+  it('the notifier\'s onFocus callback is wired to the exact same path as the tray\'s onFocusSession, which calls the injected focusSession', async () => {
+    const { surface, resolveReady } = makeSurface()
+    const { client } = makeClient()
+    const { tray } = makeTray()
+    const { createNotifier, fireOnFocus } = makeNotifier()
+    const focusSpy = vi.fn()
+
+    main({ appSurface: surface, client, createTray: () => tray, createNotifier, focusSession: focusSpy })
+    resolveReady()
+    await new Promise(r => setTimeout(r, 0))
+
+    const s = session({ sessionId: 's9', project: 'clicked-repo' })
+    fireOnFocus(s)
+
+    expect(focusSpy).toHaveBeenCalledTimes(1)
+    expect(focusSpy).toHaveBeenCalledWith(s)
+  })
+
+  it('the tray\'s own onFocusSession callback (its context-menu items) also calls the injected focusSession, with the exact session', async () => {
+    const { surface, resolveReady } = makeSurface()
+    const { client } = makeClient()
+    const { createNotifier } = makeNotifier()
+    const focusSpy = vi.fn()
+    let capturedCallbacks: import('../src/tray.js').TrayCallbacks | undefined
+    const { tray } = makeTray()
+    const createTray = vi.fn((_send: (msg: ClientMessage) => void, callbacks: import('../src/tray.js').TrayCallbacks) => {
+      capturedCallbacks = callbacks
+      return tray
+    })
+
+    main({ appSurface: surface, client, createTray, createNotifier, focusSession: focusSpy })
+    resolveReady()
+    await new Promise(r => setTimeout(r, 0))
+
+    const s = session({ sessionId: 's3', project: 'menu-clicked-repo' })
+    capturedCallbacks?.onFocusSession(s)
+
+    expect(focusSpy).toHaveBeenCalledTimes(1)
+    expect(focusSpy).toHaveBeenCalledWith(s)
   })
 })
 
@@ -177,8 +278,9 @@ describe('main: connectivity poll', () => {
       const { surface, resolveReady } = makeSurface()
       const { client, emit } = makeClient()
       const { tray, renders } = makeTray()
+      const { createNotifier } = makeNotifier()
 
-      main({ appSurface: surface, client, createTray: () => tray, pollIntervalMs: 10 })
+      main({ appSurface: surface, client, createTray: () => tray, createNotifier, focusSession: vi.fn(), pollIntervalMs: 10 })
       resolveReady()
       await vi.advanceTimersByTimeAsync(0)
       emit([session({ cwd: '/a/my-repo' })])
@@ -198,8 +300,9 @@ describe('main: connectivity poll', () => {
     const { surface, resolveReady, fireBeforeQuit } = makeSurface()
     const { client } = makeClient()
     const { tray } = makeTray()
+    const { createNotifier } = makeNotifier()
 
-    main({ appSurface: surface, client, createTray: () => tray, pollIntervalMs: 10 })
+    main({ appSurface: surface, client, createTray: () => tray, createNotifier, focusSession: vi.fn(), pollIntervalMs: 10 })
     resolveReady()
     await new Promise(r => setTimeout(r, 0))
     const callsBefore = clearSpy.mock.calls.length
@@ -215,30 +318,34 @@ describe('main: before-quit disposal', () => {
   // Disposal must be PROVEN, not merely "ran without throwing" — a missing
   // dispose assertion was Phase 2's ninth vacuous test (per the Phase 3
   // brief's self-review). Assert each disposable was actually disposed.
-  it('disposes both the client and the tray, not merely runs without throwing', async () => {
+  it('disposes the client, the tray AND the notifier, not merely runs without throwing', async () => {
     const { surface, fireBeforeQuit, resolveReady } = makeSurface()
     const { client } = makeClient()
     const { tray, dispose } = makeTray()
+    const { createNotifier, dispose: notifierDispose } = makeNotifier()
 
-    main({ appSurface: surface, client, createTray: () => tray })
+    main({ appSurface: surface, client, createTray: () => tray, createNotifier, focusSession: vi.fn() })
     resolveReady()
     await new Promise(r => setTimeout(r, 0))
 
     expect(client.dispose).not.toHaveBeenCalled()
     expect(dispose).not.toHaveBeenCalled()
+    expect(notifierDispose).not.toHaveBeenCalled()
 
     fireBeforeQuit()
 
     expect(client.dispose).toHaveBeenCalledTimes(1)
     expect(dispose).toHaveBeenCalledTimes(1)
+    expect(notifierDispose).toHaveBeenCalledTimes(1)
   })
 
   it('is safe to fire before-quit twice and does not double-dispose', async () => {
     const { surface, fireBeforeQuit, resolveReady } = makeSurface()
     const { client } = makeClient()
     const { tray } = makeTray()
+    const { createNotifier, dispose: notifierDispose } = makeNotifier()
 
-    main({ appSurface: surface, client, createTray: () => tray })
+    main({ appSurface: surface, client, createTray: () => tray, createNotifier, focusSession: vi.fn() })
     resolveReady()
     await new Promise(r => setTimeout(r, 0))
 
@@ -246,14 +353,16 @@ describe('main: before-quit disposal', () => {
     fireBeforeQuit()
 
     expect(client.dispose).toHaveBeenCalledTimes(1)
+    expect(notifierDispose).toHaveBeenCalledTimes(1)
   })
 
-  it('a second instance that quit immediately never registers a before-quit disposal for a client/tray it never built', async () => {
+  it('a second instance that quit immediately never registers a before-quit disposal for a client/tray/notifier it never built', async () => {
     const { surface, fireBeforeQuit } = makeSurface({ locked: false })
     const { client } = makeClient()
     const { tray, dispose } = makeTray()
+    const { createNotifier, dispose: notifierDispose } = makeNotifier()
 
-    main({ appSurface: surface, client, createTray: () => tray })
+    main({ appSurface: surface, client, createTray: () => tray, createNotifier, focusSession: vi.fn() })
     await new Promise(r => setTimeout(r, 20))
 
     // No before-quit handler was ever registered by the losing instance, so
@@ -262,5 +371,6 @@ describe('main: before-quit disposal', () => {
     expect(() => fireBeforeQuit()).not.toThrow()
     expect(client.dispose).not.toHaveBeenCalled()
     expect(dispose).not.toHaveBeenCalled()
+    expect(notifierDispose).not.toHaveBeenCalled()
   })
 })
