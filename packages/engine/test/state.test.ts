@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { SessionStore } from '../src/state.js'
 import { FakeClock } from '../src/clock.js'
 import { DEFAULT_CONFIG } from '@nudge/shared/config'
+import { UNKNOWN_SURFACE } from '@nudge/shared/types'
 import type { HookName, NudgeEvent } from '@nudge/shared/types'
 
 let clock: FakeClock
@@ -135,6 +136,31 @@ describe('session identity and lifecycle', () => {
   it('lists sessions with no SessionStart, created lazily', () => {
     store.apply(ev('Notification', { message: 'Allow?' }))
     expect(store.get('s1')!.project).toBe('my-repo')
+  })
+})
+
+/**
+ * Small fix from the review triage: `#ensure` used to assign the exported
+ * `UNKNOWN_SURFACE` singleton directly (`ev.surface ?? UNKNOWN_SURFACE`), so
+ * every session created without an explicit surface shared the exact same
+ * object reference. Any downstream code that mutated `session.surface` in
+ * place (or a future one) would silently corrupt every other unknown-surface
+ * session, plus the shared module-level constant itself. Fixed by freezing
+ * UNKNOWN_SURFACE (so an accidental in-place mutation throws loudly instead
+ * of succeeding silently) and spreading a fresh copy per session.
+ */
+describe('UNKNOWN_SURFACE is not shared between sessions', () => {
+  it('gives each session its own surface object rather than one shared reference', () => {
+    store.apply(ev('SessionStart'))
+    store.apply(ev('SessionStart', { sessionId: 's2', cwd: '/a/other', project: 'other' }))
+    const s1 = store.get('s1')!
+    const s2 = store.get('s2')!
+    expect(s1.surface).not.toBe(s2.surface)
+    expect(s1.surface).not.toBe(UNKNOWN_SURFACE)
+  })
+
+  it('freezes UNKNOWN_SURFACE so an in-place mutation throws instead of corrupting every session', () => {
+    expect(() => { (UNKNOWN_SURFACE as Record<string, unknown>).tty = 'x' }).toThrow()
   })
 })
 

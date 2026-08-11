@@ -63,4 +63,11 @@ export interface Alert {
   detail?: string
 }
 
-export const UNKNOWN_SURFACE: Surface = { kind: 'unknown' }
+// Frozen: this is a shared module-level singleton, and every session that
+// starts without a known surface used to be assigned this exact object
+// reference (see state.ts). An in-place mutation of one session's `surface`
+// would then silently corrupt every other unknown-surface session, and this
+// constant itself, for the lifetime of the process. Freezing turns that into
+// a loud TypeError instead of a silent, hard-to-trace bug; call sites should
+// spread a copy (`{ ...UNKNOWN_SURFACE }`) rather than assign this directly.
+export const UNKNOWN_SURFACE: Surface = Object.freeze({ kind: 'unknown' })

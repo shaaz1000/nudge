@@ -47,7 +47,10 @@ export class SessionStore {
         sessionId: ev.sessionId,
         project: ev.project,
         cwd: ev.cwd,
-        surface: ev.surface ?? UNKNOWN_SURFACE,
+        // Spread, not a direct assignment: UNKNOWN_SURFACE is a shared,
+        // frozen singleton (see types.ts) — assigning it directly would give
+        // every unknown-surface session the same object reference.
+        surface: ev.surface ?? { ...UNKNOWN_SURFACE },
         status: 'running',
         tier: null,
         waitingSince: null,
