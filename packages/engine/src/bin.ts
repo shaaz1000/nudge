@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { performance } from 'node:perf_hooks'
-import { loadConfig } from '@nudge/shared/config'
+import { loadConfig, setMuted } from '@nudge/shared/config'
 import { lockPath } from '@nudge/shared/paths'
 import { loadChannels } from '@nudge/channels'
 import { SystemClock } from './clock.js'
@@ -91,7 +91,13 @@ const drift = new DriftDetector({
   onDrift: () => engine.onResume(),
 })
 
-engine = new Engine({ cfg, clock, store, db, escalator, dispatcher, notifier, watchdog, server, drift })
+engine = new Engine({
+  cfg, clock, store, db, escalator, dispatcher, notifier, watchdog, server, drift,
+  // Finding I7: persist mute to config.json so `nudge status` (a separate
+  // process) agrees with `nudge mute`, and so a restart doesn't silently
+  // unmute everything.
+  persistMuted: on => setMuted(on),
+})
 
 await engine.start()
 await drainSpool(ev => engine.handle(ev))

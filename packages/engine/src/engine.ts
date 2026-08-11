@@ -22,6 +22,14 @@ export interface EngineDeps {
   server: EngineServer
   /** Optional; when absent the engine simply does not re-arm after sleep. */
   drift?: { start(): () => void }
+  /**
+   * Finding I7: persists the mute flag so `nudge status` (a separate
+   * process, re-reading config.json fresh every time) agrees with `nudge
+   * mute`, and so a restart doesn't silently unmute everything. Optional and
+   * defaulting to a no-op so unit tests that build an Engine directly don't
+   * touch any file; bin.ts wires this to shared/config's setMuted().
+   */
+  persistMuted?: (on: boolean) => void
 }
 
 export class Engine {
@@ -114,6 +122,11 @@ export class Engine {
 
   mute(on: boolean): void {
     this.d.cfg.muted = on
+    try {
+      this.d.persistMuted?.(on)
+    } catch (err) {
+      console.error('nudge engine: persistMuted failed', err)
+    }
     if (on) this.d.escalator.cancelAll()
     this.d.server.broadcast(this.d.store.list())
   }

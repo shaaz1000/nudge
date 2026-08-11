@@ -22,7 +22,7 @@ const ev = (hook: HookName, extra: Partial<NudgeEvent> = {}): NudgeEvent => ({
   cwd: '/a/my-repo', project: 'my-repo', ts: clock.now(), ...extra,
 })
 
-function build(over: Record<string, unknown> = {}) {
+function build(over: Record<string, unknown> = {}, extraDeps: Record<string, unknown> = {}) {
   const cfg = mergeConfig({ channel: { id: 'test', options: {} }, ...over }) as NudgeConfig
   clock = new FakeClock(0)
   db = new Db(join(dir, 'e.db'))
@@ -46,6 +46,7 @@ function build(over: Record<string, unknown> = {}) {
   engine = new Engine({
     cfg, clock, store, db, escalator, dispatcher,
     notifier: notifier as never, watchdog, server: server as never,
+    ...extraDeps,
   })
   return { cfg, store, server, setIdle: (v: number) => { idle = v } }
 }
@@ -261,6 +262,36 @@ describe('shutdown and suppression against an in-flight ladder', () => {
     expect(store.get('s1')!.snoozedUntil).toBe(90_000 + 3_600_000)
     clock.advance(600_000)
     expect(phone).toEqual([])
+  })
+})
+
+/**
+ * Finding I7: `nudge mute` only ever flipped `cfg.muted` on the engine's
+ * in-memory config object — nothing wrote it to config.json. `nudge status`
+ * re-reads config.json fresh in a separate process on every invocation, so
+ * it disagreed with `nudge mute` immediately, and a plain engine restart
+ * silently unmuted everything with no trace it had happened. `persistMuted`
+ * is an optional engine dependency (defaults to a no-op, so every other test
+ * in this file that builds an Engine without it keeps working unchanged and
+ * never touches a real file) that bin.ts wires to shared/config's
+ * setMuted() — this test only proves the engine calls it, not the on-disk
+ * effect itself, which config.test.ts already covers directly.
+ */
+describe('mute persistence (I7)', () => {
+  it('calls persistMuted with the new value whenever mute() is called', () => {
+    const persistMuted = vi.fn()
+    build({}, { persistMuted })
+    engine.mute(true)
+    expect(persistMuted).toHaveBeenCalledWith(true)
+    engine.mute(false)
+    expect(persistMuted).toHaveBeenCalledWith(false)
+    expect(persistMuted).toHaveBeenCalledTimes(2)
+  })
+
+  it('still flips cfg.muted in-memory even when persistMuted is absent', () => {
+    const { cfg } = build()
+    engine.mute(true)
+    expect(cfg.muted).toBe(true)
   })
 })
 
