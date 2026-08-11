@@ -10,7 +10,7 @@ vi.mock('electron', () => ({ clipboard: { writeText: vi.fn() }, Notification: vi
 import type { SessionState, Surface } from '@nudge/shared/types'
 import {
   buildFocusPlan, focusSession, escapeAppleScriptString, escapePowerShellSingleQuoted,
-  type FocusSpawner, type ClipboardSurface,
+  type FocusSpawner, type ClipboardSurface, type FocusDeps,
 } from '../src/focus.js'
 
 const session = (surface: Surface, over: Partial<SessionState> = {}): SessionState => ({
@@ -20,8 +20,19 @@ const session = (surface: Surface, over: Partial<SessionState> = {}): SessionSta
   message: 'Allow?', snoozedUntil: null, pushFailed: false, ...over,
 })
 
-/** A hostile payload carrying every character Phase 1's real PowerShell injection bug involved. */
-const HOSTILE = `plain" $(rm -rf /) \`whoami\` ; echo pwned's`
+/**
+ * A hostile payload carrying every character Phase 1's real PowerShell
+ * injection bug involved, PLUS `\r`, `\n`, and a trailing backslash (review
+ * round 1, Finding 1's methodology hardening) — a CR, an LF, and a lone
+ * trailing `\`. The newline pair is exactly what the round-1 CRITICAL finding
+ * exploited: a `#`-comment ends at a line break, not at a string's closing
+ * quote, so `wtSession = 'abc\nStart-Process calc.exe #'` used to emit a
+ * second, live, executable PowerShell line — a bug invisible to the original
+ * HOSTILE constant because it had no newline in it. Every escaper (and every
+ * script-builder that interpolates a value) is exercised against this widened
+ * payload below, not just the branch that broke.
+ */
+const HOSTILE = `plain" $(rm -rf /) \`whoami\` ; echo pwned's\r\nStart-Process calc.exe #\\`
 
 const noCommands = () => false
 
@@ -192,10 +203,110 @@ describe('buildFocusPlan: Terminal.app / iTerm2 (macOS) — AppleScript targetin
     )
     expect(plan).toEqual({ kind: 'clipboard', text: '/x/proj', reason: expect.any(String) })
   })
+
+  // --- Review round 1, Finding 3 ---
+  // `tty of t contains "<value>"` substring-matched, so a single-digit tty
+  // (or any value that is a substring of a real device path, e.g. "2" inside
+  // "/dev/ttys002") could match the WRONG tab and focus it — landing
+  // somewhere wrong rather than failing honestly. Both scripts also called
+  // `activate` unconditionally BEFORE searching, so the app came forward
+  // regardless of whether anything actually matched.
+  describe('Finding 3: exact match, not substring; activate only on a real match', () => {
+    it('Terminal.app: compares with `is`, never `contains` — a short tty cannot substring-match a longer device path', () => {
+      const plan = buildFocusPlan(
+        session({ kind: 'terminal', termProgram: 'Apple_Terminal', tty: '2' }), 'darwin', noCommands,
+      )
+      if (plan.kind !== 'spawn') throw new Error('expected spawn')
+      const script = plan.args[1]
+      expect(script).toContain('if tty of t is "2"')
+      expect(script).not.toContain('contains')
+    })
+
+    it('iTerm2: compares with `is`, never `contains`', () => {
+      const plan = buildFocusPlan(
+        session({ kind: 'terminal', termProgram: 'iTerm.app', tty: '2' }), 'darwin', noCommands,
+      )
+      if (plan.kind !== 'spawn') throw new Error('expected spawn')
+      const script = plan.args[1]
+      expect(script).toContain('if tty of sess is "2"')
+      expect(script).not.toContain('contains')
+    })
+
+    it('Terminal.app: `activate` appears only inside the matched branch, after the search starts — never unconditionally up front', () => {
+      const plan = buildFocusPlan(
+        session({ kind: 'terminal', termProgram: 'Apple_Terminal', tty: '/dev/ttys002' }), 'darwin', noCommands,
+      )
+      if (plan.kind !== 'spawn') throw new Error('expected spawn')
+      const script = plan.args[1]
+      const matchLine = script.indexOf('if tty of t is')
+      const activateLine = script.indexOf('activate')
+      expect(matchLine).toBeGreaterThan(-1)
+      expect(activateLine).toBeGreaterThan(matchLine) // activate is INSIDE the if, not before the search
+    })
+
+    it('iTerm2: `activate` appears only inside the matched branch', () => {
+      const plan = buildFocusPlan(
+        session({ kind: 'terminal', termProgram: 'iTerm.app', tty: '/dev/ttys002' }), 'darwin', noCommands,
+      )
+      if (plan.kind !== 'spawn') throw new Error('expected spawn')
+      const script = plan.args[1]
+      const matchLine = script.indexOf('if tty of sess is')
+      const activateLine = script.indexOf('activate')
+      expect(matchLine).toBeGreaterThan(-1)
+      expect(activateLine).toBeGreaterThan(matchLine)
+    })
+
+    // "Failing visibly beats landing somewhere wrong": since `activate` no
+    // longer fires unconditionally, a non-match must still tell the user
+    // something, via the exact clipboard-copy + notification UX every other
+    // "nothing to focus" case in this module already uses. `cwd`/`project`
+    // are interpolated into this AppleScript for the first time (they never
+    // were before this fix) — proven escaped here with the same HOSTILE
+    // payload used for `tty`, not a separate assumption.
+    it('Terminal.app: the script itself falls back to copying the cwd and notifying when no tab matches, with cwd/reason escaped', () => {
+      const plan = buildFocusPlan(
+        session({ kind: 'terminal', termProgram: 'Apple_Terminal', tty: '/dev/ttys002' }, { cwd: HOSTILE, project: HOSTILE }),
+        'darwin', noCommands,
+      )
+      if (plan.kind !== 'spawn') throw new Error('expected spawn')
+      const script = plan.args[1]
+      expect(script).toContain('if not matched then')
+      expect(script).toContain('set the clipboard to')
+      expect(script).toContain('display notification')
+      expect(script).toContain(escapeAppleScriptString(HOSTILE))
+      expect(script).not.toContain(HOSTILE)
+    })
+
+    it('iTerm2: the script itself falls back to copying the cwd and notifying when no tab matches, with cwd/reason escaped', () => {
+      const plan = buildFocusPlan(
+        session({ kind: 'terminal', termProgram: 'iTerm.app', tty: '/dev/ttys002' }, { cwd: HOSTILE, project: HOSTILE }),
+        'darwin', noCommands,
+      )
+      if (plan.kind !== 'spawn') throw new Error('expected spawn')
+      const script = plan.args[1]
+      expect(script).toContain('if not matched then')
+      expect(script).toContain('set the clipboard to')
+      expect(script).toContain('display notification')
+      expect(script).toContain(escapeAppleScriptString(HOSTILE))
+      expect(script).not.toContain(HOSTILE)
+    })
+  })
 })
 
 describe('buildFocusPlan: Windows Terminal — focus by process + WT_SESSION', () => {
-  it('win32 with a recorded wtSession: builds a PowerShell script, with wtSession escaped', () => {
+  // --- Review round 1, Finding 1 (CRITICAL) ---
+  // wtSession used to be interpolated into a `#`-comment line, escaped with
+  // `escapePowerShellSingleQuoted` — an escaper whose contract only covers a
+  // value INSIDE a single-quoted string literal, not a comment. A `#`
+  // comment ends at the line break, not the string's closing quote, so
+  // `wtSession = "abc\nStart-Process calc.exe #"` (exactly HOSTILE's
+  // shape, post-hardening) emitted a second, live, executable PowerShell
+  // line. Fixed by no longer interpolating wtSession into the script at all
+  // — proven below by a fixed, wtSession-INDEPENDENT expected script, not
+  // merely "the raw payload doesn't appear verbatim" (which the injection
+  // payload never did even before the fix — it was the ESCAPED form that
+  // broke out of the comment).
+  it('win32 with a recorded wtSession: builds a PowerShell script with NO wtSession interpolation at all (Finding 1)', () => {
     const plan = buildFocusPlan(
       session({ kind: 'terminal', wtSession: HOSTILE }), 'win32', noCommands,
     )
@@ -203,8 +314,35 @@ describe('buildFocusPlan: Windows Terminal — focus by process + WT_SESSION', (
     if (plan.kind !== 'spawn') throw new Error('expected spawn')
     expect(plan.cmd).toBe('powershell')
     const script = plan.args.join('\n')
-    expect(script).toContain(escapePowerShellSingleQuoted(HOSTILE))
+    expect(script).toContain('AppActivate')
+    expect(script).toContain('WindowsTerminal')
+    // Neither the raw payload NOR its escaped form appears anywhere — the
+    // script is byte-for-byte the same regardless of wtSession's value.
     expect(script).not.toContain(HOSTILE)
+    expect(script).not.toContain(escapePowerShellSingleQuoted(HOSTILE))
+    // The sharpest form of the proof: the script for a hostile wtSession is
+    // IDENTICAL to the script for a boring one — wtSession has zero
+    // influence over the emitted text.
+    const boringPlan = buildFocusPlan(session({ kind: 'terminal', wtSession: 'w-1' }), 'win32', noCommands)
+    if (boringPlan.kind !== 'spawn') throw new Error('expected spawn')
+    expect(script).toBe(boringPlan.args.join('\n'))
+  })
+
+  // The concrete exploit the finding described: a newline followed by a live
+  // PowerShell statement, disguised as trailing a `#` comment. Reproduced
+  // directly (not just via the shared HOSTILE constant) so the regression
+  // this fix closes is unambiguous on its own.
+  it('a wtSession crafted as a comment-breakout payload cannot inject a second executable line (Finding 1 regression)', () => {
+    const payload = 'abc\nStart-Process calc.exe #'
+    const plan = buildFocusPlan(session({ kind: 'terminal', wtSession: payload }), 'win32', noCommands)
+    if (plan.kind !== 'spawn') throw new Error('expected spawn')
+    const script = plan.args[2] // the -Command script itself, not the whole argv
+    expect(script).not.toContain('Start-Process')
+    expect(script.split('\n')).toHaveLength(2) // exactly the two fixed lines below — nothing wtSession-derived
+    expect(script).toBe([
+      "$p = Get-Process -Name 'WindowsTerminal' -ErrorAction SilentlyContinue | Select-Object -First 1",
+      'if ($p) { (New-Object -ComObject WScript.Shell).AppActivate($p.Id) }',
+    ].join('\n'))
   })
 
   it('win32 with no recorded wtSession — clipboard fallback', () => {
@@ -298,19 +436,48 @@ describe('focusSession: executes the plan via injected surfaces', () => {
 // resolve-shaped payload.
 // ---------------------------------------------------------------------------
 describe('focusSession: never resolves the wait', () => {
-  it('has no `send` parameter anywhere in FocusDeps — structurally impossible to reach the engine socket', async () => {
-    const { spawner } = makeSpawner()
-    const { clipboard } = makeClipboard()
+  // --- Review round 1, Finding 2 ---
+  // The old version of this test called focusSession() four times and
+  // contained ZERO `expect(...)` calls — it could not fail no matter what
+  // FocusDeps looked like, so it protected nothing while appearing to. Its
+  // own comment claimed a `@ts-expect-error` check "below" as a second,
+  // stronger proof that never actually existed anywhere in the file. The
+  // structural claim itself is true (FocusDeps at focus.ts:330-337 has no
+  // `send`/ClientMessage field) — this replaces the vacuous test with the
+  // real compile-time guard the old comment only claimed to have.
+  //
+  // Verified by temporarily adding `send?: (msg: unknown) => void` to
+  // `FocusDeps` in focus.ts and re-running `tsc --build`: with `send` added,
+  // this line's `@ts-expect-error` correctly reports "Unused '@ts-expect-error'
+  // directive" (the object literal below no longer errors, because `send` is
+  // now a real, accepted key) — proving the check actually exercises
+  // FocusDeps's shape rather than passing vacuously. Reverted immediately
+  // after confirming that; `tsc --build` is clean again with FocusDeps back
+  // to its real shape. See the task report for the exact transcript.
+  it('FocusDeps structurally cannot accept a `send`/ClientMessage field — enforced at compile time', () => {
+    // @ts-expect-error `send` is not a key of FocusDeps — if this stops
+    // erroring, FocusDeps grew exactly the field the class doc above (see
+    // focusSession's "Critical rule") says it must never have, and
+    // `tsc --build` fails on this file until it's removed again.
+    const deps: FocusDeps = { send: (_msg: unknown) => {} }
+    // Reached only if TS's excess-property check somehow didn't fire —
+    // keeps this a real, runnable test rather than type-only dead code.
+    expect(typeof deps).toBe('object')
+  })
+
+  it('exhaustively runs focusSession across every surface with no way to pass anything resolve-shaped', async () => {
+    const { spawner, calls } = makeSpawner()
+    const { clipboard, written } = makeClipboard()
     // If FocusDeps ever grows a `send`/ClientMessage field, this call site
     // would need updating to pass it — its continued absence here, across
-    // every surface below, is the proof.
+    // every surface below, is the runtime half of the proof (the compile-time
+    // half is the `@ts-expect-error` test above). Also checks that nothing
+    // spawned or written even incidentally resembles a resolve/ack payload.
     await focusSession(session({ kind: 'vscode' }), { spawner, clipboard, notify: vi.fn(), platform: 'darwin' })
     await focusSession(session({ kind: 'desktop', app: { name: 'Claude' } }), { spawner, clipboard, notify: vi.fn(), platform: 'darwin' })
     await focusSession(session({ kind: 'terminal', tty: '2' }), { spawner, clipboard, notify: vi.fn(), platform: 'darwin' })
     await focusSession(session({ kind: 'unknown' }), { spawner, clipboard, notify: vi.fn(), platform: 'darwin' })
-    // No assertion beyond "this compiles and runs" is needed for the
-    // structural half of the claim; @ts-expect-error below (a second,
-    // stronger form of the same proof) would fail to compile if `send` were
-    // ever accepted.
+    for (const call of calls) expect(JSON.stringify(call)).not.toContain('resolve')
+    for (const text of written) expect(text).not.toContain('resolve')
   })
 })

@@ -9,17 +9,33 @@ import type { SessionState, Surface } from '@nudge/shared/types'
 // double-quoted PowerShell string rather than escaping it, so the reused
 // escaper's output was not actually safe there. This module writes FIVE
 // per-surface branches (VS Code/Cursor/Windsurf, Claude desktop app,
-// Terminal.app/iTerm2, Windows Terminal, Linux) but only TWO of them ever
+// Terminal.app/iTerm2, Windows Terminal, Linux) but only THREE of them ever
 // interpolate a value into a script string that a shell-like interpreter
 // (osascript, powershell) will parse — AppleScript (desktop-app-by-name,
-// Terminal.app/iTerm2-by-tty) and PowerShell (desktop-app-by-name on
-// Windows, Windows-Terminal-by-wtSession). Every other branch (the editor
-// CLIs, and Linux's wmctrl/xdotool) passes its value as a single argv
-// element to `spawn()` with no shell in between — there is no script syntax
-// there for a quote/`$(...)`/backtick/`;` to break out of, so no escaper
+// Terminal.app/iTerm2-by-tty, and the Terminal.app/iTerm2 no-match fallback's
+// clipboard/notification text) and PowerShell (desktop-app-by-name on
+// Windows only). Every other branch (the editor CLIs, Linux's
+// wmctrl/xdotool, and — as of the fix below — Windows-Terminal-by-wtSession)
+// passes its value as a single argv element to `spawn()` with no shell in
+// between, or never embeds the value in a script at all, so no escaper
 // applies (see `buildFocusPlan`'s editor-CLI branch for exactly this note).
 // The two escapers that DO exist are named for the language they target,
 // not the surface, and are never swapped between each other.
+//
+// --- Review round 1, Finding 1 (CRITICAL) ---
+// `buildWindowsTerminalFocusScript` used to interpolate `wtSession` into a
+// `#`-comment line, escaped with `escapePowerShellSingleQuoted`. That
+// escaper's contract (see its doc below) only covers a value placed INSIDE a
+// single-quoted string literal — it doubles `'` and does nothing about
+// `\r`/`\n`. A `#` comment ends at the line break, not at the string's
+// closing quote, so `wtSession = 'abc\nStart-Process calc.exe #'` emitted a
+// SECOND, live, executable PowerShell line — the escaper's guarantee was
+// silently violated by this usage context (a comment, not a string literal).
+// This is the exact category of bug this module's whole doc comment above
+// exists to prevent, just with the escaper/context pairing right this time
+// and the injection vector being where the value LANDS (a comment) rather
+// than which escaper was used. Fixed by no longer interpolating `wtSession`
+// into the script at all — see `buildWindowsTerminalFocusScript`'s own doc.
 // ---------------------------------------------------------------------------
 
 /**
@@ -63,41 +79,91 @@ function clipboardFallback(s: SessionState, reason: string): FocusPlan {
   return { kind: 'clipboard', text: s.cwd, reason }
 }
 
-function buildTerminalAppFocusScript(tty: string): string {
-  const t = escapeAppleScriptString(tty)
+/**
+ * Builds the AppleScript source shared by the Terminal.app and iTerm2
+ * branches: search for the exact recorded tty, then either focus it or fall
+ * back — entirely within this one script, since it is spawned fire-and-forget
+ * (see `realSpawner`) with nothing on the JS side ever inspecting its result.
+ *
+ * Review round 1, Finding 3: two problems in the old scripts, both fixed here:
+ *   1. `tty of t contains "<value>"` substring-matched, so a single-digit
+ *      tty (or any value that happens to be a substring of a real device
+ *      path, e.g. "2" inside "/dev/ttys002") could match the WRONG tab and
+ *      focus it — landing somewhere wrong rather than failing honestly.
+ *      Fixed by exact comparison (`is`, not `contains`).
+ *   2. Both scripts called `activate` unconditionally BEFORE searching, so
+ *      the app came forward even on a total non-match. Fixed by moving
+ *      `activate` inside the matched branch — it now only runs when a tab
+ *      was actually found.
+ *   Because `activate` no longer fires unconditionally, a non-match must do
+ *   SOMETHING visible instead of silently leaving the terminal wherever it
+ *   was ("failing visibly beats landing somewhere wrong") — so `matched`
+ *   tracks whether the nested search succeeded, and the no-match branch
+ *   copies the project's folder path to the clipboard and shows a
+ *   notification, mirroring `clipboardFallback`'s own UX for every other
+ *   "nothing to focus" case in this module. `cwd`/`reason` are interpolated
+ *   into this same AppleScript, so — new as of this fix, since neither was
+ *   ever embedded in a script before — they go through
+ *   `escapeAppleScriptString` too, not just `tty`.
+ */
+function terminalNoMatchScript(s: SessionState, cwdEscaped: string): string[] {
+  const reason = escapeAppleScriptString(
+    `Nudge could not find the recorded terminal tab for "${s.project}" (it may have been closed); copied its folder path to the clipboard instead.`,
+  )
   return [
+    'if not matched then',
+    `  set the clipboard to "${cwdEscaped}"`,
+    `  display notification "${reason}" with title "Nudge"`,
+    'end if',
+  ]
+}
+
+function buildTerminalAppFocusScript(s: SessionState, tty: string): string {
+  const t = escapeAppleScriptString(tty)
+  const cwd = escapeAppleScriptString(s.cwd)
+  return [
+    'set matched to false',
     'tell application "Terminal"',
-    '  activate',
     '  repeat with w in windows',
     '    repeat with t in tabs of w',
-    `      if tty of t contains "${t}" then`,
+    `      if tty of t is "${t}" then`,
+    '        activate',
     '        set frontmost of w to true',
     '        set selected tab of w to t',
-    '        return',
+    '        set matched to true',
+    '        exit repeat',
     '      end if',
     '    end repeat',
+    '    if matched then exit repeat',
     '  end repeat',
     'end tell',
+    ...terminalNoMatchScript(s, cwd),
   ].join('\n')
 }
 
-function buildITermFocusScript(tty: string): string {
+function buildITermFocusScript(s: SessionState, tty: string): string {
   const t = escapeAppleScriptString(tty)
+  const cwd = escapeAppleScriptString(s.cwd)
   return [
+    'set matched to false',
     'tell application "iTerm2"',
-    '  activate',
     '  repeat with w in windows',
     '    repeat with tb in tabs of w',
     '      repeat with sess in sessions of tb',
-    `        if tty of sess contains "${t}" then`,
+    `        if tty of sess is "${t}" then`,
+    '          activate',
     '          select tb',
     '          select w',
-    '          return',
+    '          set matched to true',
+    '          exit repeat',
     '        end if',
     '      end repeat',
+    '      if matched then exit repeat',
     '    end repeat',
+    '    if matched then exit repeat',
     '  end repeat',
     'end tell',
+    ...terminalNoMatchScript(s, cwd),
   ].join('\n')
 }
 
@@ -109,16 +175,28 @@ function buildWindowsAppActivateScript(name: string): string {
  * Best-effort only: `WT_SESSION` identifies one specific pane/tab, but
  * Windows Terminal exposes no public window property carrying it, so there
  * is no way to select that exact pane from outside the process — only the
- * process itself can be brought to the foreground. `wtSession` is still
- * escaped and threaded into the script (as a comment marker, not live
- * logic) so this stays defensively correct — never building an unescaped
- * interpolation anywhere, even where today's version only echoes the value
- * — if a future revision finds a real per-pane API to target.
+ * process itself can be brought to the foreground.
+ *
+ * Fix (review round 1, Finding 1 — CRITICAL): this used to interpolate
+ * `wtSession` into the script as a `#`-comment line via
+ * `escapePowerShellSingleQuoted`. That escaper's contract only covers a
+ * value placed INSIDE a single-quoted string literal (see its doc) — a `#`
+ * comment ends at the line break, not the string's closing quote, so a
+ * `wtSession` containing a real newline (e.g.
+ * `"abc\nStart-Process calc.exe #"`) broke out of the comment and became a
+ * second, live, executable PowerShell line. `wtSession` was never live logic
+ * here — the old comment said so itself — only ever echoed for a future
+ * maintainer's benefit, so the simplest CORRECT fix is to stop interpolating
+ * it into the script at all. Presence/absence of `surface.wtSession` is
+ * still what `terminalPlan` uses to decide whether this branch (vs. the
+ * clipboard fallback) applies at all — only the VALUE is no longer threaded
+ * into the script text. If a future revision finds a real per-pane API to
+ * target, thread `wtSession` through as a plain value the script's own
+ * control flow branches on (still never string-interpolated), not back into
+ * a comment.
  */
-function buildWindowsTerminalFocusScript(wtSession: string): string {
-  const escaped = escapePowerShellSingleQuoted(wtSession)
+function buildWindowsTerminalFocusScript(): string {
   return [
-    `# focus target wtSession='${escaped}' (process-level only; WT_SESSION is not exposed for pane-level targeting)`,
     "$p = Get-Process -Name 'WindowsTerminal' -ErrorAction SilentlyContinue | Select-Object -First 1",
     'if ($p) { (New-Object -ComObject WScript.Shell).AppActivate($p.Id) }',
   ].join('\n')
@@ -154,15 +232,18 @@ function terminalPlan(
       return clipboardFallback(s, `Nudge has no recorded terminal (tty) for "${s.project}"; copied its folder path to the clipboard instead.`)
     }
     const script = surface.termProgram === 'iTerm.app'
-      ? buildITermFocusScript(surface.tty)
-      : buildTerminalAppFocusScript(surface.tty) // Apple_Terminal, or any other macOS terminal we don't specifically recognise.
+      ? buildITermFocusScript(s, surface.tty)
+      : buildTerminalAppFocusScript(s, surface.tty) // Apple_Terminal, or any other macOS terminal we don't specifically recognise.
     return { kind: 'spawn', cmd: 'osascript', args: ['-e', script] }
   }
   if (platform === 'win32') {
     if (!surface.wtSession) {
       return clipboardFallback(s, `Nudge has no recorded Windows Terminal session for "${s.project}"; copied its folder path to the clipboard instead.`)
     }
-    return { kind: 'spawn', cmd: 'powershell', args: ['-NoProfile', '-Command', buildWindowsTerminalFocusScript(surface.wtSession)] }
+    // surface.wtSession's presence is still what gates this branch — see
+    // buildWindowsTerminalFocusScript's doc for why its VALUE is no longer
+    // threaded into the script (Finding 1).
+    return { kind: 'spawn', cmd: 'powershell', args: ['-NoProfile', '-Command', buildWindowsTerminalFocusScript()] }
   }
   if (platform === 'linux') {
     // No tty-level match available via wmctrl/xdotool (they operate on
