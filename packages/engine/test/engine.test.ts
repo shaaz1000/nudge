@@ -18,6 +18,15 @@ import type { NudgeConfig } from '@nudge/shared/config'
 
 let dir: string, clock: FakeClock, db: Db, engine: Engine
 let local: string[], phone: string[]
+/**
+ * Round 2, Finding 1: tracks calls to `notifier.alertSound()` separately
+ * from `local` (which tracks full `notifier.alert()` calls — banner +
+ * sound together, the no-GUI path). Only exercised by the "Finding 5"
+ * describe block below, which toggles a real GUI connection; every other
+ * fixture's `server.hasGuiClient()` stub is hardcoded `false`, so
+ * `alertSound()` is never reached there.
+ */
+let soundOnly: string[]
 
 const ev = (hook: HookName, extra: Partial<NudgeEvent> = {}): NudgeEvent => ({
   source: 'claude-code', sessionId: 's1', hook,
@@ -28,10 +37,13 @@ function build(over: Record<string, unknown> = {}, extraDeps: Record<string, unk
   const cfg = mergeConfig({ channel: { id: 'test', options: {} }, ...over }) as NudgeConfig
   clock = new FakeClock(0)
   db = new Db(join(dir, 'e.db'))
-  local = []; phone = []
+  local = []; phone = []; soundOnly = []
 
   const store = new SessionStore(cfg, clock)
-  const notifier = { alert: (s: { project: string }, tier: string) => local.push(`${s.project}:${tier}`) }
+  const notifier = {
+    alert: (s: { project: string }, tier: string) => local.push(`${s.project}:${tier}`),
+    alertSound: (tier: string) => soundOnly.push(tier),
+  }
   const dispatcher = new Dispatcher(cfg, clock, async () => ({
     id: 'test', configSchema: {},
     send: async (a: { project: string; tier: string }) => { phone.push(`${a.project}:${a.tier}`) },
@@ -295,9 +307,15 @@ describe('engine defers to a connected GUI client (Finding 5)', () => {
     const cfg = mergeConfig({ channel: { id: 'test', options: {} } }) as NudgeConfig
     clock = new FakeClock(0)
     db = new Db(join(dir, 'gui.db'))
-    local = []; phone = []
+    local = []; phone = []; soundOnly = []
     const store = new SessionStore(cfg, clock)
-    const notifier = { alert: (s: { project: string }, tier: string) => local.push(`${s.project}:${tier}`) }
+    const notifier = {
+      // Full alert (banner + sound) — the no-GUI path.
+      alert: (s: { project: string }, tier: string) => local.push(`${s.project}:${tier}`),
+      // Sound only — round 2, Finding 1's fix, taken while a GUI is
+      // connected and the banner is left to the tray's own Notifier.
+      alertSound: (tier: string) => soundOnly.push(tier),
+    }
     const dispatcher = new Dispatcher(cfg, clock, async () => ({
       id: 'test', configSchema: {},
       send: async (a: { project: string; tier: string }) => { phone.push(`${a.project}:${a.tier}`) },
@@ -334,13 +352,14 @@ describe('engine defers to a connected GUI client (Finding 5)', () => {
     return sock
   }
 
-  it('GUI connected -> no engine banner (local alert suppressed at t=0)', async () => {
+  it('GUI connected -> no engine banner at t=0, but the per-tier sound still fires (round 2, Finding 1)', async () => {
     buildWithRealServer()
     await realServer.listen(sockPath)
     const guiSock = await subscribeGui(true)
 
     engine.handle(ev('Notification', { message: 'Allow Bash?' }))
-    expect(local).toEqual([])
+    expect(local).toEqual([]) // no banner: the tray's own clickable Notifier shows one instead
+    expect(soundOnly).toEqual(['blocked']) // but the configured sound for this tier still plays
 
     guiSock.destroy()
   })
@@ -352,6 +371,7 @@ describe('engine defers to a connected GUI client (Finding 5)', () => {
 
     engine.handle(ev('Notification', { message: 'Allow Bash?' }))
     expect(local).toEqual([]) // suppressed while the GUI is connected
+    expect(soundOnly).toEqual(['blocked']) // the sound is not
 
     guiSock.destroy()
     await vi.waitFor(() => expect(realServer.hasGuiClient()).toBe(false))
@@ -361,7 +381,29 @@ describe('engine defers to a connected GUI client (Finding 5)', () => {
     await vi.waitFor(() => expect(local).toEqual(['my-repo:blocked']))
   })
 
-  it('two GUIs connected -> still no banner; only disconnecting BOTH resumes it', async () => {
+  it('the escalation ladder\'s local repeats stay audible (sound-only) for the whole time a GUI is connected', async () => {
+    buildWithRealServer()
+    await realServer.listen(sockPath)
+    const guiSock = await subscribeGui(true)
+
+    engine.handle(ev('Notification', { message: 'Allow Bash?' }))
+    expect(soundOnly).toEqual(['blocked']) // t=0
+
+    // Default cfg: localRepeat=3 every localRepeatIntervalMs=60s, so t=60s
+    // and t=120s are two more repeats — well short of activeDelayMs=180s,
+    // so phone escalation cannot have fired yet and isn't muddying this.
+    clock.advance(60_000)
+    await vi.waitFor(() => expect(soundOnly).toEqual(['blocked', 'blocked']))
+    clock.advance(60_000)
+    await vi.waitFor(() => expect(soundOnly).toEqual(['blocked', 'blocked', 'blocked']))
+
+    expect(local).toEqual([]) // the banner never fired even once across all three repeats
+    expect(phone).toEqual([]) // and phone escalation hasn't kicked in yet either
+
+    guiSock.destroy()
+  })
+
+  it('two GUIs connected -> still no banner (sound still fires); only disconnecting BOTH resumes the banner', async () => {
     buildWithRealServer()
     await realServer.listen(sockPath)
     const a = await subscribeGui(true)
@@ -372,6 +414,7 @@ describe('engine defers to a connected GUI client (Finding 5)', () => {
 
     engine.handle(ev('Notification', { message: 'Allow Bash?' }))
     expect(local).toEqual([])
+    expect(soundOnly).toEqual(['blocked'])
 
     a.destroy()
     await new Promise(r => setTimeout(r, 50))

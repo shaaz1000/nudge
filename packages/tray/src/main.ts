@@ -206,10 +206,13 @@ export function main(deps: MainDeps = {}): void {
     // Task 4's clickable-notification module. Wired to the SAME
     // `callbacks.onFocusSession` the tray's own per-session menu items use
     // (not a second, independent path to focus.ts) — see Notifier's class
-    // doc for the de-duplication contract and the double-notification
-    // decision (shipped live, `silent: true`, residual visual duplication
-    // against the engine's own osascript banner documented as a known,
-    // out-of-scope gap).
+    // doc for the de-duplication contract. Round 1, Finding 5 closed the
+    // visual duplication against the engine's own osascript banner (the
+    // engine skips its banner entirely while this tray is connected); round
+    // 2, Finding 1 closed the follow-on audible gap that fix introduced (the
+    // engine's sound-only alert, including escalation repeats, still plays
+    // while this Notifier's own banner stays `silent: true`) — neither is an
+    // open, out-of-scope gap any more.
     const notifier: NotifierLike = deps.createNotifier
       ? deps.createNotifier(s => callbacks.onFocusSession(s))
       : new Notifier(s => callbacks.onFocusSession(s))

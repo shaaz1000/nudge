@@ -287,7 +287,16 @@ describe('EngineServer', () => {
       expect(server.hasGuiClient()).toBe(true)
 
       a.s.destroy()
-      await vi.waitFor(() => expect(server.hasGuiClient()).toBe(true)) // b is still connected
+      // Round 2, Finding 2: NOT vi.waitFor — its callback runs synchronously
+      // once, before any timer is scheduled, i.e. before the server has even
+      // processed `a`'s 'close' event. The assertion would then be true at
+      // that instant no matter what #attach's onGone does (including a
+      // broken implementation that clears the ENTIRE #guiSubscribers set on
+      // any disconnect), so it proves nothing. A real wait for the event
+      // loop to actually run the close handler (same pattern as :321-343
+      // below) is required to exercise the real behaviour.
+      await new Promise(r => setTimeout(r, 50))
+      expect(server.hasGuiClient()).toBe(true) // b is still connected
       b.s.end()
     })
 
@@ -396,6 +405,17 @@ describe('EngineServer', () => {
     })
 
     it('missing onGuiDisconnected (an older/partial ServerHandlers) never throws when the last GUI disconnects', async () => {
+      // Round 2, Finding 2: the old version of this test had zero `expect()`
+      // calls, and its inline claim that an unguarded call "would throw
+      // synchronously" was false regardless — `#attach`'s onGone (server.ts)
+      // already wraps `this.h.onGuiDisconnected?.()` in a try/catch, so even
+      // removing the `?.` would not make anything escape past this test.
+      // What DOES change if the `?.` is removed: calling `undefined()`
+      // throws a TypeError inside that try, which is caught and logged via
+      // `console.error('nudge server: onGuiDisconnected handler failed', ...)`.
+      // Spying on console.error gives a real, mechanical way to tell the two
+      // implementations apart even though neither one crashes the process.
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
       const noHandler = new EngineServer({
         onEvent: () => {}, onList: () => [], onSnooze: vi.fn(), onMute: vi.fn(),
         onResolve: vi.fn(), onIdle: vi.fn(), onFrontmost: vi.fn(),
@@ -408,9 +428,11 @@ describe('EngineServer', () => {
         a.s.write(encode({ t: 'subscribe', id: 1, gui: true }))
         await a.next()
         a.s.destroy()
-        await new Promise(r => setTimeout(r, 50)) // would throw synchronously in the 'close' handler if unguarded
+        await new Promise(r => setTimeout(r, 50))
+        expect(errSpy).not.toHaveBeenCalled() // the `?.` swallowed the missing handler with nothing logged
       } finally {
         await noHandler.close()
+        errSpy.mockRestore()
       }
     })
   })

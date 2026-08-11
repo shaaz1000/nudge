@@ -114,31 +114,34 @@ function defaultSurface(): NotifySurface {
  * class's git history for the full reasoning that used to live here (why
  * `mute` and `frontmost` were each the wrong tool for this).
  *
- * **Review round 1, Finding 5 (USER-APPROVED) closed this properly**: the
- * engine now knows when a GUI client is connected (`subscribe({gui:true})`,
- * see `@nudge/client`'s `EngineClientOptions.gui` and main.ts's wiring of
- * this exact `EngineClient`) and skips `notifier.alert()` — banner AND
- * sound, since `DesktopNotifier.alert()` is one call for both — entirely
- * while one is (see packages/engine/src/engine.ts's `onLocal`). The
- * VISUAL-duplication defect described in the old version of this comment no
- * longer exists: with this tray running, only this Notifier's banner shows.
+ * **Review round 1, Finding 5 (USER-APPROVED) closed the VISUAL half of
+ * this**: the engine now knows when a GUI client is connected
+ * (`subscribe({gui:true})`, see `@nudge/client`'s `EngineClientOptions.gui`
+ * and main.ts's wiring of this exact `EngineClient`) and skips its own
+ * banner entirely while one is (see packages/engine/src/engine.ts's
+ * `onLocal`). With this tray running, only this Notifier's banner shows —
+ * no duplicate.
  *
- * One residual trade-off, deliberately left as-is (out of Finding 5's own
- * stated scope, which lists `packages/engine`/`shared`/`vscode` — not
- * `packages/tray`): every notification here is still built `silent: true`
- * (see `#show` below), which used to be justified by "the engine already
- * plays a sound for this event, so this module's own default sound would be
- * a redundant second ding." That justification no longer fully holds — when
- * this tray IS connected (the common case now), the engine skips its sound
- * too, so a waiting session currently produces a SILENT visual banner and no
- * sound at all. Flagged, not silently absorbed: if an audible cue while the
- * tray is running turns out to matter, the fix is here (drop `silent: true`,
- * or thread the sound through more deliberately), not in the engine.
+ * Every notification here is still built `silent: true` (see `#show`
+ * below), and that is deliberately final, not a residual gap: **round 2,
+ * Finding 1** closed the AUDIBLE half by splitting the engine's own alert
+ * into a banner and a sound (`DesktopNotifier#alertSound`,
+ * packages/engine/src/desktop.ts) and having `onLocal` skip only the banner
+ * while a GUI is connected. The engine's per-tier sound (which alone can
+ * honour a configured `.wav` or an explicit `sound: null` — this tray has
+ * no `NudgeConfig` of its own to check) still plays on every alert,
+ * including every escalation-ladder repeat. So: exactly one clickable
+ * (silent) banner from this Notifier, plus exactly one configured sound
+ * from the engine, per alert — not a redundant second ding, and not
+ * silence either.
  *
- * This Notifier still only ever fires ONCE per wait (de-dup, above) even
- * though the engine's own ladder — now effectively paused while a GUI is
- * connected — would otherwise have repeated up to `cfg.escalation.localRepeat`
- * additional times (default 3, every `localRepeatIntervalMs` = 60s).
+ * This Notifier still only ever fires ONCE per wait (de-dup, above), but
+ * that no longer costs anything: the engine's own ladder is NOT paused
+ * while a GUI is connected (round 2, Finding 1 fixed this — it used to be,
+ * which was worse than the double banner it replaced) — it keeps firing its
+ * sound-only alert up to `cfg.escalation.localRepeat` additional times
+ * (default 3, every `localRepeatIntervalMs` = 60s), so a long wait still
+ * gets audible re-pings even though this banner itself does not repeat.
  */
 export class Notifier {
   readonly #onFocus: (s: SessionState) => void
