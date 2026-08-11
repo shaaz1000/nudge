@@ -82,13 +82,14 @@ export class StatusBar {
   constructor(surface: StatusBarSurface = defaultSurface()) {
     this.#surface = surface
     this.#item = surface.createStatusBarItem()
+    // Set once: nothing ever clears it, so re-assigning it on every render()
+    // call would be pure repetition.
     this.#item.command = FOCUS_COMMAND
     this.#item.show()
   }
 
   render(mine: SessionState[], connected: boolean): void {
     if (this.#disposed) return
-    this.#item.command = FOCUS_COMMAND
 
     if (!connected) {
       this.#item.text = '$(bell-slash) Nudge'
