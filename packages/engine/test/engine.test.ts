@@ -263,3 +263,23 @@ describe('shutdown and suppression against an in-flight ladder', () => {
     expect(phone).toEqual([])
   })
 })
+
+describe('resume after sleep', () => {
+  it('re-arms a still-waiting session so escalation is not lost to a sleeping laptop', async () => {
+    build()
+    engine.handle(ev('Notification', { message: 'Allow?' }))
+    clock.advance(120_000)
+    engine.onResume()          // laptop woke; ladder restarted from now
+    clock.advance(120_000)
+    expect(phone).toHaveLength(0)
+    clock.advance(60_001)
+    await vi.waitFor(() => expect(phone).toHaveLength(1))
+  })
+
+  it('leaves a non-waiting session alone', () => {
+    build()
+    engine.handle(ev('SessionStart'))
+    expect(() => engine.onResume()).not.toThrow()
+    expect(phone).toHaveLength(0)
+  })
+})

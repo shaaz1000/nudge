@@ -20,12 +20,15 @@ export interface EngineDeps {
   notifier: DesktopNotifier
   watchdog: Watchdog
   server: EngineServer
+  /** Optional; when absent the engine simply does not re-arm after sleep. */
+  drift?: { start(): () => void }
 }
 
 export class Engine {
   #idleMs = 0
   #frontmost: string | null = null
   #stopWatchdog: (() => void) | null = null
+  #stopDrift: (() => void) | null = null
 
   constructor(private d: EngineDeps) {}
 
@@ -37,14 +40,31 @@ export class Engine {
   async start(): Promise<void> {
     await this.d.server.listen()
     this.#stopWatchdog = this.d.watchdog.start()
+    this.#stopDrift = this.d.drift?.start() ?? null
     this.d.db.prune(this.d.clock.now() - this.d.cfg.retentionDays * 86_400_000)
   }
 
   async stop(): Promise<void> {
     this.#stopWatchdog?.()
+    this.#stopDrift?.()
     this.d.escalator.cancelAll()
     await this.d.server.close()
     this.d.db.close()
+  }
+
+  /**
+   * Called after a sleep or clock change. Ladders scheduled before the jump are
+   * no longer trustworthy, so every still-waiting session is re-armed from now
+   * and the watchdog re-evaluates immediately.
+   */
+  onResume(): void {
+    for (const s of this.d.store.list()) {
+      if (s.tier === null || s.waitingSince === null) continue
+      this.d.escalator.cancel(s.sessionId)
+      this.d.escalator.begin(s, s.tier)
+    }
+    this.d.watchdog.tick()
+    this.d.server.broadcast(this.d.store.list())
   }
 
   handle(ev: NudgeEvent): void {

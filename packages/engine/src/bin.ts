@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { performance } from 'node:perf_hooks'
 import { loadConfig } from '@nudge/shared/config'
 import { loadChannels } from '@nudge/channels'
 import { SystemClock } from './clock.js'
@@ -11,6 +12,7 @@ import { EngineServer } from './server.js'
 import { Db } from './db.js'
 import { Engine } from './engine.js'
 import { drainSpool } from './drain.js'
+import { DriftDetector } from './drift.js'
 
 const cfg = loadConfig()
 const clock = new SystemClock()
@@ -45,7 +47,14 @@ const server = new EngineServer({
   onFrontmost: id => engine.setFrontmost(id),
 })
 
-engine = new Engine({ cfg, clock, store, db, escalator, dispatcher, notifier, watchdog, server })
+const drift = new DriftDetector({
+  clock,
+  wall: () => Date.now(),
+  mono: () => performance.now(),
+  onDrift: () => engine.onResume(),
+})
+
+engine = new Engine({ cfg, clock, store, db, escalator, dispatcher, notifier, watchdog, server, drift })
 
 await engine.start()
 await drainSpool(ev => engine.handle(ev))
