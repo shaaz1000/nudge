@@ -12,6 +12,30 @@
     "vscode": "^1.85.0",
     "node": ">=22.5.0"
   },
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "commands": [
+      { "command": "nudge.focusSession", "title": "Nudge: Go to Waiting Session" },
+      { "command": "nudge.snooze", "title": "Nudge: Snooze a Waiting Session" },
+      { "command": "nudge.mute", "title": "Nudge: Toggle Mute" },
+      { "command": "nudge.showList", "title": "Nudge: Show Waiting Sessions" }
+    ],
+    "configuration": {
+      "title": "Nudge",
+      "properties": {
+        "nudge.showToasts": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a toast notification when a Claude Code session starts waiting on you. When off, only the status bar item reflects it."
+        },
+        "nudge.socketPath": {
+          "type": "string",
+          "default": "",
+          "description": "Override the Nudge engine socket path. Leave empty to use the engine's default (honours NUDGE_HOME)."
+        }
+      }
+    }
+  },
   "scripts": {
     "build": "tsc --build"
   },
