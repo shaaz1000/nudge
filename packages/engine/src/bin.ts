@@ -15,6 +15,7 @@ import { Engine } from './engine.js'
 import { drainSpool } from './drain.js'
 import { DriftDetector } from './drift.js'
 import { acquireLock } from './lock.js'
+import { shutdown, startOrExit } from './shutdown.js'
 
 /**
  * Finding C1 (part 3): the last unguarded path. Every handler this daemon
@@ -99,9 +100,15 @@ engine = new Engine({
   persistMuted: on => setMuted(on),
 })
 
-await engine.start()
-await drainSpool(ev => engine.handle(ev))
+// Finding C3: engine.start()/stop() rejections used to leave the process
+// half-dead — alive, still holding the lock, but neither running nor
+// exiting. startOrExit()/shutdown() (shutdown.ts) make lock release and
+// process exit unconditional on both the startup and shutdown paths.
+const started = await startOrExit(() => engine.start(), lock)
+if (started) {
+  await drainSpool(ev => engine.handle(ev))
 
-for (const sig of ['SIGINT', 'SIGTERM'] as const) {
-  process.on(sig, () => { void engine.stop().then(() => { lock.release(); process.exit(0) }) })
+  for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+    process.on(sig, () => shutdown(() => engine.stop(), lock))
+  }
 }
