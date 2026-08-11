@@ -1,0 +1,20 @@
+{
+  "session_id": "fixture-session-1",
+  "transcript_path": "/tmp/fixture-project/transcript.jsonl",
+  "cwd": "/tmp/fixture-project",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "echo captured",
+    "description": "Echo captured"
+  },
+  "tool_response": {
+    "stdout": "captured",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false,
+    "noOutputExpected": false
+  },
+  "tool_use_id": "toolu_01RAptc1WuwzBCLxBDhWAZ3Y"
+}

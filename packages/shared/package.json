@@ -1,0 +1,14 @@
+{
+  "name": "@nudge/shared",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    "./types": "./dist/types.js",
+    "./paths": "./dist/paths.js",
+    "./config": "./dist/config.js",
+    "./protocol": "./dist/protocol.js",
+    "./normalize": "./dist/normalize.js"
+  },
+  "engines": { "node": ">=22.5.0" },
+  "scripts": { "build": "tsc --build" }
+}
