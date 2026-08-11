@@ -14,6 +14,15 @@ import { EngineServer } from '../src/server.js'
 import { Db } from '../src/db.js'
 import { mergeConfig } from '@nudge/shared/config'
 import type { NudgeConfig } from '@nudge/shared/config'
+import { socketPath } from '@nudge/shared/paths'
+
+// vi.waitFor's default timeout (1s) is tuned for FakeClock-driven suites
+// where a condition either holds already or never will. This file is the one
+// place that waits on real OS process-spawn and real socket I/O, which can
+// legitimately take longer on a loaded CI runner — an explicit, generous
+// timeout here means a genuine regression fails clearly instead of flaking
+// on a slow machine.
+const WAIT_FOR_MS = 5_000
 
 // This suite is the one place that spawns the REAL compiled hook binary
 // (packages/hook/dist/bin.js) as a child process and lets it talk to a REAL
@@ -36,12 +45,18 @@ const pExecFile = promisify(execFile)
 let home: string, clock: FakeClock, db: Db, engine: Engine
 let phone: Array<{ project: string; tier: string; detail?: string }>
 let local: string[]
+let originalNudgeHome: string | undefined
 
 /**
  * Spawns the compiled hook binary exactly as Claude Code would: JSON payload
  * on stdin, NUDGE_HOME pointed at this test's temp dir so the hook's socket
  * client (packages/hook/src/send.ts, via @nudge/shared/paths socketPath())
- * resolves to the same path the server below is listening on.
+ * resolves to the same address the server below is listening on. This must
+ * be `socketPath()`'s own resolution, not a hand-built path: on POSIX that's
+ * a plain file under NUDGE_HOME, but on Windows it's a named pipe keyed off
+ * a hash of NUDGE_HOME (see paths.ts) — a bare temp-dir path is not a valid
+ * pipe address there, so hand-building one would make the hook and the
+ * engine agree on nothing.
  * NUDGE_NO_SPAWN=1 stops the hook from fork-spawning a second real engine
  * process if the write ever fails — this suite already owns one engine and
  * must not let a flaky send fork a stray daemon that outlives the test.
@@ -57,6 +72,12 @@ async function fireHook(payload: Record<string, unknown>): Promise<void> {
 beforeEach(async () => {
   home = mkdtempSync(join(tmpdir(), 'nudge-int-'))
   mkdirSync(join(home, 'spool'), { recursive: true })
+  // Set on this (parent) process too, not just the hook's child env above —
+  // socketPath() below reads process.env.NUDGE_HOME directly, and the server
+  // it binds runs in this process. Restored in afterEach so this test file
+  // never leaks its temp dir into the rest of the suite.
+  originalNudgeHome = process.env.NUDGE_HOME
+  process.env.NUDGE_HOME = home
   clock = new FakeClock(0)
   db = new Db(join(home, 'n.db'))
   phone = []
@@ -92,12 +113,14 @@ beforeEach(async () => {
     watchdog: new Watchdog(cfg, clock, store, t => engine.onWatchdogStall(t)),
     server,
   })
-  await server.listen(join(home, 'engine.sock'))
+  await server.listen(socketPath())
 })
 
 afterEach(async () => {
   await engine.stop()
   rmSync(home, { recursive: true, force: true })
+  if (originalNudgeHome === undefined) delete process.env.NUDGE_HOME
+  else process.env.NUDGE_HOME = originalNudgeHome
 })
 
 describe('hook process -> socket -> engine -> channel', () => {
@@ -110,10 +133,10 @@ describe('hook process -> socket -> engine -> channel', () => {
       cwd: '/tmp/fixture-project', message: 'Allow Bash(rsync secret-host)?',
     })
 
-    await vi.waitFor(() => expect(local).toContain('fixture-project:blocked'))
+    await vi.waitFor(() => expect(local).toContain('fixture-project:blocked'), WAIT_FOR_MS)
 
     clock.advance(180_001)
-    await vi.waitFor(() => expect(phone).toHaveLength(1))
+    await vi.waitFor(() => expect(phone).toHaveLength(1), WAIT_FOR_MS)
 
     // The privacy rule, verified across the real wire: nothing sensitive left.
     expect(phone[0].project).toBe('fixture-project')
@@ -132,19 +155,19 @@ describe('hook process -> socket -> engine -> channel', () => {
 
   it('cancels the escalation when the tool actually runs', async () => {
     await fireHook({ hook_event_name: 'Notification', session_id: 's2', cwd: '/tmp/fixture-project', message: 'Allow?' })
-    await vi.waitFor(() => expect(local).toHaveLength(1))
+    await vi.waitFor(() => expect(local).toHaveLength(1), WAIT_FOR_MS)
     clock.advance(60_000)
     await fireHook({ hook_event_name: 'PostToolUse', session_id: 's2', cwd: '/tmp/fixture-project', tool_name: 'Bash' })
-    await vi.waitFor(() => expect(engine.sessions()[0].status).toBe('running'))
+    await vi.waitFor(() => expect(engine.sessions()[0].status).toBe('running'), WAIT_FOR_MS)
     clock.advance(600_000)
     expect(phone).toHaveLength(0)
   })
 
   it('records the wait in history with a resolution reason', async () => {
     await fireHook({ hook_event_name: 'Notification', session_id: 's3', cwd: '/tmp/fixture-project', message: 'Allow?' })
-    await vi.waitFor(() => expect(db.openWaits()).toHaveLength(1))
+    await vi.waitFor(() => expect(db.openWaits()).toHaveLength(1), WAIT_FOR_MS)
     await fireHook({ hook_event_name: 'UserPromptSubmit', session_id: 's3', cwd: '/tmp/fixture-project' })
-    await vi.waitFor(() => expect(db.openWaits()).toHaveLength(0))
+    await vi.waitFor(() => expect(db.openWaits()).toHaveLength(0), WAIT_FOR_MS)
     expect(db.waitsSince(0).at(-1)!.resolvedBy).toBe('UserPromptSubmit')
   })
 })
