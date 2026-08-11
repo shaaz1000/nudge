@@ -5,7 +5,15 @@ test/**
 .gitignore
 .superpowers/**
 **/tsconfig.json
+**/*.tsbuildinfo
 **/*.map
 **/*.ts
 node_modules/**
 *.vsix
+# The esbuild bundle (dist/extension.cjs, pointed to by "main") is
+# self-contained and is the only thing the extension host ever loads.
+# These are tsc's own per-module ESM outputs, built purely for
+# type-checking (npx tsc --build) — they still contain unresolved
+# `@nudge/shared/...` imports that only resolve inside this monorepo's
+# node_modules symlink, so they must never ship in the .vsix.
+dist/*.js

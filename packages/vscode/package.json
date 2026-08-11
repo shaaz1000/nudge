@@ -7,7 +7,7 @@
   "type": "module",
   "publisher": "nudge",
   "categories": ["Other"],
-  "main": "./dist/extension.js",
+  "main": "./dist/extension.cjs",
   "engines": {
     "vscode": "^1.85.0",
     "node": ">=22.5.0"
@@ -37,12 +37,15 @@
     }
   },
   "scripts": {
-    "build": "tsc --build"
+    "build": "tsc --build",
+    "bundle": "esbuild src/extension.ts --bundle --outfile=dist/extension.cjs --platform=node --format=cjs --external:vscode --target=node18",
+    "vscode:prepublish": "npm run bundle"
   },
   "dependencies": {
     "@nudge/shared": "0.1.0"
   },
   "devDependencies": {
-    "@types/vscode": "^1.85.0"
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.21.5"
   }
 }
