@@ -71,6 +71,7 @@ const watchdog = new Watchdog(
   cfg, clock, store,
   t => engine.onWatchdogStall(t),
   id => engine.onWatchdogDrop(id),
+  () => engine.onWatchdogPrune(),
 )
 
 const server = new EngineServer({

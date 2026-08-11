@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { SessionStore } from '../src/state.js'
-import { Watchdog } from '../src/watchdog.js'
+import { Watchdog, PRUNE_INTERVAL_MS } from '../src/watchdog.js'
 import { FakeClock } from '../src/clock.js'
 import { mergeConfig } from '@nudge/shared/config'
 import type { HookName, NudgeEvent } from '@nudge/shared/types'
@@ -152,6 +152,51 @@ describe('onDrop callback (I1)', () => {
     clock.advance(86_400_001)
     expect(() => wd2.tick()).not.toThrow()
     expect(store.get('s2')).toBeUndefined()
+  })
+})
+
+describe('onPrune callback (I2)', () => {
+  it('does not fire before PRUNE_INTERVAL_MS has elapsed since construction', () => {
+    const prunes: number[] = []
+    const wd2 = new Watchdog(cfg, clock, store, () => {}, () => {}, () => prunes.push(clock.now()))
+    clock.advance(PRUNE_INTERVAL_MS - 1)
+    wd2.tick()
+    expect(prunes).toHaveLength(0)
+  })
+
+  it('fires once PRUNE_INTERVAL_MS has elapsed, and not again until another full interval passes', () => {
+    const prunes: number[] = []
+    const wd2 = new Watchdog(cfg, clock, store, () => {}, () => {}, () => prunes.push(clock.now()))
+
+    clock.advance(PRUNE_INTERVAL_MS + 1)
+    wd2.tick()
+    expect(prunes).toHaveLength(1)
+
+    clock.advance(1_000) // nowhere close to another interval
+    wd2.tick()
+    expect(prunes).toHaveLength(1)
+
+    clock.advance(PRUNE_INTERVAL_MS)
+    wd2.tick()
+    expect(prunes).toHaveLength(2)
+  })
+
+  it('defaults to a no-op onPrune when the callback is omitted, without throwing', () => {
+    const wd2 = new Watchdog(cfg, clock, store, () => {})
+    clock.advance(PRUNE_INTERVAL_MS + 1)
+    expect(() => wd2.tick()).not.toThrow()
+  })
+
+  it('survives a throwing onPrune callback and continues ticking', () => {
+    let calls = 0
+    const wd2 = new Watchdog(cfg, clock, store, () => {}, () => {}, () => { calls++; throw new Error('boom') })
+    clock.advance(PRUNE_INTERVAL_MS + 1)
+    expect(() => wd2.tick()).not.toThrow()
+    expect(calls).toBe(1)
+
+    clock.advance(PRUNE_INTERVAL_MS + 1)
+    expect(() => wd2.tick()).not.toThrow()
+    expect(calls).toBe(2)
   })
 })
 

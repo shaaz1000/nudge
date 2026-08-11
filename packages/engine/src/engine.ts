@@ -95,6 +95,17 @@ export class Engine {
     this.d.server.broadcast(this.d.store.list())
   }
 
+  /**
+   * Finding I2: retention used to run exactly once, in start(), before the
+   * daemon settles in to run for however many weeks until its next
+   * restart — after which nothing pruned old events or resolved waits
+   * again. Watchdog now calls this periodically (see PRUNE_INTERVAL_MS in
+   * watchdog.ts) with the same cutoff math start() already used.
+   */
+  onWatchdogPrune(): void {
+    this.d.db.prune(this.d.clock.now() - this.d.cfg.retentionDays * 86_400_000)
+  }
+
   snooze(id: string, ms: number): void {
     this.d.store.snooze(id, ms)
     this.d.escalator.cancel(id)

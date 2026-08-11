@@ -7,11 +7,11 @@ import { FakeClock } from '../src/clock.js'
 import { SessionStore } from '../src/state.js'
 import { Escalator } from '../src/escalation.js'
 import { Dispatcher } from '../src/dispatch.js'
-import { Watchdog } from '../src/watchdog.js'
+import { Watchdog, PRUNE_INTERVAL_MS } from '../src/watchdog.js'
 import { EngineServer } from '../src/server.js'
 import { Db } from '../src/db.js'
 import { mergeConfig } from '@nudge/shared/config'
-import type { HookName, NudgeEvent } from '@nudge/shared/types'
+import type { HookName, NudgeEvent, SessionState } from '@nudge/shared/types'
 import type { NudgeConfig } from '@nudge/shared/config'
 
 let dir: string, clock: FakeClock, db: Db, engine: Engine
@@ -315,6 +315,69 @@ describe('watchdog TTL drop cleanup (I1)', () => {
     // the server, not the watchdog loop), so drive the sweep directly.
     expect(() => engine.onWatchdogDrop('s1')).not.toThrow()
     expect(db.openWaits()).toHaveLength(0)
+  })
+})
+
+describe('periodic retention pruning via the watchdog (I2)', () => {
+  it('prunes old events and resolved waits again after the initial boot-time prune, without a restart', async () => {
+    const cfg = mergeConfig({
+      channel: { id: 'test', options: {} },
+      retentionDays: 1,
+      watchdog: { stallAfterMs: 900_000, sessionTtlMs: 86_400_000, tickMs: 30_000 },
+    }) as NudgeConfig
+    clock = new FakeClock(0); db = new Db(join(dir, 'prune.db')); local = []; phone = []
+    const store = new SessionStore(cfg, clock)
+    const dispatcher = new Dispatcher(cfg, clock, async () => ({
+      id: 'test', configSchema: {}, send: async () => {},
+    }))
+    const escalator = new Escalator({ cfg, clock, idleMs: () => 0, onLocal: () => {}, onPhone: () => {} })
+    const watchdog = new Watchdog(
+      cfg, clock, store,
+      t => engine.onWatchdogStall(t),
+      id => engine.onWatchdogDrop(id),
+      () => engine.onWatchdogPrune(),
+    )
+    const server = { broadcast: vi.fn(), listen: vi.fn(), close: vi.fn() }
+    engine = new Engine({
+      cfg, clock, store, db, escalator, dispatcher,
+      notifier: { alert: () => {} } as never, watchdog, server: server as never,
+    })
+
+    // The one-shot boot-time prune (engine.ts's start()) — nothing exists
+    // yet, so this is a no-op. Proves the periodic path below isn't just
+    // riding on this call.
+    await engine.start()
+
+    clock.advance(1_000)
+    const oldSession: SessionState = {
+      sessionId: 'old', project: 'x', cwd: '/a/x', surface: { kind: 'unknown' },
+      status: 'blocked', tier: 'blocked', waitingSince: clock.now(), turnStartedAt: null,
+      lastEventAt: clock.now(), message: 'Allow?', snoozedUntil: null, pushFailed: false,
+    }
+    db.recordEvent({
+      source: 'claude-code', sessionId: 'old', hook: 'Notification',
+      cwd: '/a/x', project: 'x', ts: clock.now(),
+    })
+    db.openWait(oldSession, 'blocked')
+    db.closeWait('old', clock.now(), 'manual')
+    expect(db.eventCount()).toBe(1)
+    expect(db.waitsSince(0)).toHaveLength(1)
+
+    // Past retentionDays (1 day) *and* past PRUNE_INTERVAL_MS (1h) from
+    // boot — old enough that only a periodic sweep, not the one-shot boot
+    // prune (which already ran, before either row existed), can be what
+    // notices and prunes these. engine.start() above already started the
+    // real watchdog loop, so this single big jump fires every intermediate
+    // tick along the way (FakeClock.advance() runs all due tasks in
+    // deadline order, including ones a callback reschedules) — the
+    // periodic onPrune the loop itself is driving, not a manually-invoked
+    // extra tick(), is what has to notice and prune these.
+    clock.advance(86_400_000 + PRUNE_INTERVAL_MS)
+
+    expect(db.eventCount()).toBe(0)
+    expect(db.waitsSince(0)).toHaveLength(0)
+
+    await engine.stop()
   })
 })
 
