@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { connect } from 'node:net'
 import { Engine } from '../src/engine.js'
 import { FakeClock } from '../src/clock.js'
 import { SessionStore } from '../src/state.js'
@@ -11,6 +12,7 @@ import { Watchdog, PRUNE_INTERVAL_MS } from '../src/watchdog.js'
 import { EngineServer } from '../src/server.js'
 import { Db } from '../src/db.js'
 import { mergeConfig } from '@nudge/shared/config'
+import { encode } from '@nudge/shared/protocol'
 import type { HookName, NudgeEvent, SessionState } from '@nudge/shared/types'
 import type { NudgeConfig } from '@nudge/shared/config'
 
@@ -429,5 +431,105 @@ describe('resume after sleep', () => {
     engine.handle(ev('SessionStart'))
     expect(() => engine.onResume()).not.toThrow()
     expect(phone).toHaveLength(0)
+  })
+})
+
+/**
+ * Finding I10: `isValidEvent` (shared/normalize.ts) used to check `hook`,
+ * `sessionId`, `cwd`, `project` and `ts`, but not `message`/`tool`/`source`.
+ * An `event` message off the wire with e.g. `message: {evil:true}` used to
+ * pass that guard, reach `EngineServer#onEvent` → `Engine#handle`, and get
+ * applied to the store (`store.apply()` runs *before* `db.recordEvent()`,
+ * which is what actually threw on the bad bind) — so the session was left
+ * sitting in the store, mutated, with no wait row opened and no escalation
+ * ladder armed, because `handle()` throws before reaching
+ * `#applyTransition`/`broadcast`. This is a full round-trip through the real
+ * socket path (the same one the C1 "malformed events" tests in
+ * server.test.ts exercise), with a real `SessionStore`/`Db` behind it,
+ * specifically to prove the *store* — not just "no exception escaped" — is
+ * left untouched now that the guard catches these fields too.
+ */
+describe('malformed optional fields never reach the store (I10)', () => {
+  // Real Engine + real SessionStore + real Db behind a real EngineServer
+  // socket, one dedicated to this describe block's own dbName/sockName —
+  // the same shape as "stop() cancels every timer" above, trimmed to just
+  // what's needed to send one wire message and inspect the store after.
+  function buildReal(dbName: string) {
+    const cfg = mergeConfig({ channel: { id: 'test', options: {} } }) as NudgeConfig
+    clock = new FakeClock(0); db = new Db(join(dir, dbName)); local = []; phone = []
+    const store = new SessionStore(cfg, clock)
+    const dispatcher = new Dispatcher(cfg, clock, async () => ({
+      id: 'test', configSchema: {}, send: async () => { phone.push('sent') },
+    }))
+    const escalator = new Escalator({
+      cfg, clock, idleMs: () => 0,
+      onLocal: (s, t) => engine.onLocal(s, t),
+      onPhone: (s, t) => { void engine.onPhone(s, t) },
+    })
+    const watchdog = new Watchdog(cfg, clock, store, t => engine.onWatchdogStall(t))
+    const server = new EngineServer({
+      onEvent: e => engine.handle(e),
+      onList: () => engine.sessions(),
+      onSnooze: (id, ms) => engine.snooze(id, ms),
+      onMute: on => engine.mute(on),
+      onResolve: id => engine.resolve(id),
+      onIdle: ms => engine.setIdle(ms),
+      onFrontmost: id => engine.setFrontmost(id),
+    })
+    engine = new Engine({
+      cfg, clock, store, db, escalator, dispatcher,
+      notifier: { alert: () => {} } as never, watchdog, server,
+    })
+    return { store, db, server }
+  }
+
+  async function sendOverSocket(server: EngineServer, sockPath: string, event: unknown): Promise<void> {
+    await server.listen(sockPath)
+    await new Promise<void>(resolve => {
+      const sock = connect(sockPath, () => {
+        sock.write(encode({ t: 'event', event }))
+        sock.end()
+        resolve()
+      })
+    })
+    await new Promise(r => setTimeout(r, 100))
+  }
+
+  it('a non-string message is dropped before it can mutate the store', async () => {
+    const { store, db, server } = buildReal('i10-bad.db')
+    try {
+      const badEvent = {
+        source: 'claude-code', sessionId: 's1', hook: 'Notification',
+        cwd: '/a/my-repo', project: 'my-repo', ts: clock.now(), message: { evil: true },
+      }
+      await sendOverSocket(server, join(dir, 'i10-bad.sock'), badEvent)
+
+      // The sharp checks: not "handle() didn't throw", but that nothing it
+      // would have done before throwing actually happened.
+      expect(store.list()).toHaveLength(0)
+      expect(store.get('s1')).toBeUndefined()
+      expect(db.eventCount()).toBe(0)
+      expect(db.openWaits()).toHaveLength(0)
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('the same event with a valid string message reaches and mutates the store', async () => {
+    const { store, db, server } = buildReal('i10-good.db')
+    try {
+      const goodEvent = {
+        source: 'claude-code', sessionId: 's1', hook: 'Notification',
+        cwd: '/a/my-repo', project: 'my-repo', ts: clock.now(), message: 'Allow?',
+      }
+      await sendOverSocket(server, join(dir, 'i10-good.sock'), goodEvent)
+
+      expect(store.get('s1')).toBeDefined()
+      expect(store.list()).toHaveLength(1)
+      expect(db.eventCount()).toBe(1)
+      expect(db.openWaits()).toHaveLength(1)
+    } finally {
+      await server.close()
+    }
   })
 })

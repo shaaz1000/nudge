@@ -139,4 +139,38 @@ describe('isValidEvent', () => {
     expect(isValidEvent(42)).toBe(false)
     expect(isValidEvent([])).toBe(false)
   })
+
+  /**
+   * Finding I10: `message`, `tool` and `source` were the three optional
+   * NudgeEvent fields this guard never checked. Live repro: an event with
+   * `message: {evil:true}` used to pass `isValidEvent`, get applied to the
+   * store (the session showed up with `tier: "blocked"`), and only then blow
+   * up inside `Db.recordEvent`'s SQLite bind — after the store mutation, so
+   * the session was left orphaned with no wait row and no escalation ladder.
+   */
+  describe('non-string optional fields (I10)', () => {
+    const badValues = [{ evil: true }, 42, ['a'], null]
+
+    for (const bad of badValues) {
+      it(`rejects a non-string message (${JSON.stringify(bad)})`, () => {
+        expect(isValidEvent({ ...valid, message: bad })).toBe(false)
+      })
+
+      it(`rejects a non-string tool (${JSON.stringify(bad)})`, () => {
+        expect(isValidEvent({ ...valid, tool: bad })).toBe(false)
+      })
+
+      it(`rejects a non-string source (${JSON.stringify(bad)})`, () => {
+        expect(isValidEvent({ ...valid, source: bad })).toBe(false)
+      })
+    }
+
+    it('still accepts the fields when absent — they remain optional', () => {
+      expect(isValidEvent(valid)).toBe(true)
+    })
+
+    it('still accepts valid string values for all three', () => {
+      expect(isValidEvent({ ...valid, message: 'hi', tool: 'Bash', source: 'claude-code' })).toBe(true)
+    })
+  })
 })

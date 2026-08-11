@@ -77,6 +77,21 @@ export function normalize(raw: unknown, surface: Surface | undefined, ts: number
  * isn't an object at all. `ts` in particular flows straight into a SQLite
  * bound parameter (`Db.recordEvent`) — a non-number there throws and, unless
  * guarded, takes the whole daemon down with it. This guard is the fix.
+ *
+ * Finding I10: this used to check only `hook`, `sessionId`, `cwd`, `project`
+ * and `ts` — not the three *optional* string fields, `message`, `tool` and
+ * `source`. An event with e.g. `message: {evil:true}` passed validation,
+ * reached `SessionStore#apply` and got applied to the session (it now shows
+ * up with `tier: "blocked"`), and only then hit `Db.recordEvent`'s SQLite
+ * bind for `message` and threw `TypeError: Provided value cannot be bound to
+ * SQLite parameter 6`. `Engine#handle`'s caller-side try/catch (server.ts)
+ * stops that throw from taking the daemon down, but `handle()` throws *after*
+ * `store.apply()` and *before* `#applyTransition`/`broadcast`, so the session
+ * is left mutated in the store with no wait row opened and no escalation
+ * ladder armed — a silently orphaned "blocked" session, the exact class of
+ * bug the TTL fix (I1) exists to clean up after, not prevent in the first
+ * place. Each of these three fields is optional (absent is still valid) but,
+ * when present, must be a string like every other field here.
  */
 export function isValidEvent(v: unknown): v is NudgeEvent {
   if (!isObj(v)) return false
@@ -86,5 +101,8 @@ export function isValidEvent(v: unknown): v is NudgeEvent {
   if (!str(v.cwd)) return false
   if (!str(v.project)) return false
   if (typeof v.ts !== 'number' || !Number.isFinite(v.ts)) return false
+  if (v.message !== undefined && typeof v.message !== 'string') return false
+  if (v.tool !== undefined && typeof v.tool !== 'string') return false
+  if (v.source !== undefined && typeof v.source !== 'string') return false
   return true
 }
