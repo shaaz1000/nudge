@@ -78,6 +78,43 @@ describe('ntfy send', () => {
     await expect(ntfyChannel.send(alert, { serverUrl: 'https://ntfy.sh' }))
       .rejects.toThrow(/topic/)
   })
+
+  // Finding I9: Node's fetch has no default timeout, so a black-holed
+  // self-hosted server left `send` pending forever — no rejection ever
+  // reached Dispatcher's retry logic, `pushFailed` never got set, and the
+  // phone escalation step silently vanished with no error anywhere.
+  describe('request timeout (I9)', () => {
+    it('passes an AbortSignal to fetch so a hanging request is abortable at all', async () => {
+      await ntfyChannel.send(alert, { serverUrl: 'https://ntfy.sh', topic: 't' })
+      const init = fetchMock.mock.calls[0][1]
+      expect(init.signal).toBeInstanceOf(AbortSignal)
+    })
+
+    it('rejects rather than hanging forever against a server that never responds', async () => {
+      // AbortSignal.timeout() is a native binding, not implemented in terms
+      // of setTimeout — verified experimentally that vitest's fake timers
+      // (vi.advanceTimersByTimeAsync) do not advance it — so this test
+      // genuinely waits out the real 10s request timeout rather than faking
+      // it; hence the generous per-test timeout override below. fetchMock
+      // here never resolves on its own, simulating a server that accepted
+      // the connection and then said nothing — exactly what the finding
+      // describes as "hangs `send` forever" before this fix.
+      fetchMock.mockImplementation((_url: string, init: { signal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          // Only settles via the signal's own abort — if `post()` ever stops
+          // passing one, this promise (like the real black-holed server it
+          // simulates) never settles at all, so a regression here shows up
+          // as this test genuinely timing out, not as a false pass.
+          if (init.signal instanceof AbortSignal) {
+            init.signal.addEventListener('abort', () => {
+              reject(Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' }))
+            })
+          }
+        }))
+      await expect(ntfyChannel.send(alert, { serverUrl: 'https://ntfy.sh', topic: 't' }))
+        .rejects.toThrow()
+    }, 15_000)
+  })
 })
 
 describe('ntfy verify', () => {

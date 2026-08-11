@@ -33,8 +33,18 @@ function headers(cfg: Record<string, unknown>, title: string, priority: string):
   return h
 }
 
+// Finding I9: Node's fetch has no default timeout, so a black-holed
+// self-hosted server (dropped connection, firewall silently swallowing the
+// request, a hung reverse proxy) left `send` pending forever — dispatch
+// never saw a rejection to retry on, `pushFailed` never got set, and the
+// phone escalation step silently vanished with no error anywhere. A finite
+// deadline turns "hangs forever" into "rejects after 10s," which is what
+// lets Dispatcher's existing retry logic and Engine#onPhone's pushFailed
+// bookkeeping actually run.
+const REQUEST_TIMEOUT_MS = 10_000
+
 async function post(url: string, h: Record<string, string>, body: string): Promise<void> {
-  const res = await fetch(url, { method: 'POST', headers: h, body })
+  const res = await fetch(url, { method: 'POST', headers: h, body, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
   if (!res.ok) throw new Error(`ntfy: HTTP ${res.status}`)
 }
 
