@@ -97,16 +97,23 @@ export class StatusBar {
       return
     }
 
-    if (mine.length === 0) {
+    // `mine` is whatever sessionsForWindow() returned: every session in
+    // this window regardless of whether it is currently waiting. Filtering
+    // here (rather than trusting mine.length) matches Toaster's own
+    // tier !== null check, since the composition root passes the identical
+    // array to both.
+    const waiting = mine.filter(s => s.tier !== null)
+
+    if (waiting.length === 0) {
       this.#item.text = '$(bell) Nudge'
       this.#item.tooltip = 'Nothing waiting'
       this.#item.backgroundColor = undefined
       return
     }
 
-    this.#item.text = `$(bell-dot) Nudge ${mine.length}`
+    this.#item.text = `$(bell-dot) Nudge ${waiting.length}`
     this.#item.backgroundColor = this.#surface.warningBackgroundColor
-    this.#item.tooltip = mine
+    this.#item.tooltip = waiting
       .map(s => `${s.project} — ${s.tier} — waiting ${formatWaitDuration(Date.now() - (s.waitingSince ?? Date.now()))}`)
       .join('\n')
   }

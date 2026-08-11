@@ -104,6 +104,41 @@ describe('StatusBar', () => {
     expect(item.text).toBe('$(bell-dot) Nudge 1')
   })
 
+  // sessionsForWindow (Task 2) filters only by folder membership — it
+  // returns every session in this window, running or waiting. The Phase 2
+  // plan's composition root (Task 6) passes that same array to both
+  // StatusBar and Toaster, and Toaster already filters to tier !== null
+  // before counting. StatusBar must do the same rather than trusting
+  // `mine.length` as if it were already the waiting count.
+  it('counts and lists only the sessions that are actually waiting, ignoring running ones in the same window', () => {
+    const item = makeItem()
+    const bar = new StatusBar(makeSurface(item))
+    const mine = [
+      session({ sessionId: 's1', project: 'running-repo', tier: null, status: 'running', waitingSince: null }),
+      session({ sessionId: 's2', project: 'waiting-repo', tier: 'blocked', waitingSince: Date.now() - 5_000 }),
+    ]
+
+    bar.render(mine, true)
+
+    expect(item.text).toBe('$(bell-dot) Nudge 1')
+    expect(item.tooltip).toContain('waiting-repo')
+    expect(item.tooltip).not.toContain('running-repo')
+  })
+
+  it('nothing waiting even when `mine` is non-empty, because every session in it is currently running', () => {
+    const item = makeItem()
+    const bar = new StatusBar(makeSurface(item))
+    const mine = [
+      session({ sessionId: 's1', project: 'running-repo', tier: null, status: 'running', waitingSince: null }),
+    ]
+
+    bar.render(mine, true)
+
+    expect(item.text).toBe('$(bell) Nudge')
+    expect(item.tooltip).toBe('Nothing waiting')
+    expect(item.backgroundColor).toBeUndefined()
+  })
+
   it('engine unreachable: bell-slash icon, no warning background, tooltip explains how to start it — not a warning color', () => {
     const item = makeItem()
     const bar = new StatusBar(makeSurface(item))
