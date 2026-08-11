@@ -1,6 +1,7 @@
 import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { claudeSettingsPath } from '@nudge/shared/paths'
+import { SUBSCRIBED } from '@nudge/shared/normalize'
 
 /**
  * Historical/informational marker — the real installed command naturally
@@ -15,10 +16,13 @@ export const NUDGE_MARK = 'nudge-hook'
 const NUDGE_SCHEMA_VERSION = 1
 
 const HOOKS_WITH_MATCHER = ['PreToolUse', 'PostToolUse'] as const
-const ALL_HOOKS = [
-  'SessionStart', 'UserPromptSubmit', 'PreToolUse',
-  'PostToolUse', 'Notification', 'Stop', 'SessionEnd',
-] as const
+/**
+ * The set of hooks setup writes entries for. This used to be a third,
+ * independent copy of the same seven-hook list carried by
+ * packages/hook/src/bin.ts and packages/engine/src/normalize.ts (finding
+ * I5) — now all three read the one list @nudge/shared exports.
+ */
+const ALL_HOOKS = SUBSCRIBED
 
 interface HookEntry {
   matcher?: string

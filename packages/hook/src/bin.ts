@@ -8,10 +8,11 @@
  *   3. never write to stdout
  * A notifier that can stall or break the agent is worse than no notifier.
  */
-import { basename } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import { encode } from '@nudge/shared/protocol'
-import type { HookName, NudgeEvent } from '@nudge/shared/types'
+import type { NudgeEvent, Surface } from '@nudge/shared/types'
+import { normalize } from '@nudge/shared/normalize'
 import { readStdin } from './read-stdin.js'
 import { detectSurfaceForHook, WALK_DEADLINE_MS } from './surface.js'
 import { sendEvent } from './send.js'
@@ -38,55 +39,48 @@ const remaining = () => Math.max(1, DEADLINE - Date.now())
  *  two on a run where nothing has actually gone wrong yet. */
 const PHASE_CAP_MS = BUDGET_MS / 2
 
-const SUBSCRIBED: readonly HookName[] = [
-  'SessionStart', 'UserPromptSubmit', 'PreToolUse',
-  'PostToolUse', 'Notification', 'Stop', 'SessionEnd',
-]
-
 // Backstop: exit 0 no matter what, even if something below hangs unexpectedly.
 // With the shared deadline above, this should be genuinely unreachable in
 // normal operation — a backstop, not a silent extension of the budget.
 const guard = setTimeout(() => process.exit(0), BUDGET_MS + 200)
 guard.unref?.()
 
+/**
+ * Parses stdin and converts it into a NudgeEvent, delegating the actual
+ * field mapping/validation to the shared `normalize()` (finding I5: this
+ * function used to reimplement `SUBSCRIBED`, `projectOf`, and the
+ * hook_event_name/session_id/cwd field mapping itself, as a second copy of
+ * packages/engine/src/normalize.ts that nothing tested against the real
+ * hook path). Only the host-app process walk stays here — it is surface
+ * detection, not event normalization, and must stay gated on the hook name
+ * *before* `normalize()` runs so it's never paid for outside SessionStart.
+ */
 function buildEvent(raw: string): NudgeEvent | null {
   let parsed: unknown
   try { parsed = JSON.parse(raw) } catch { return null }
   if (typeof parsed !== 'object' || parsed === null) return null
 
-  const p = parsed as Record<string, unknown>
-  const hook = p.hook_event_name
-  const sessionId = p.session_id
-  const cwd = p.cwd
-  if (typeof hook !== 'string' || !SUBSCRIBED.includes(hook as HookName)) return null
-  if (typeof sessionId !== 'string' || typeof cwd !== 'string') return null
+  const hook = (parsed as Record<string, unknown>).hook_event_name
 
-  const ev: NudgeEvent = {
-    source: 'claude-code',
-    sessionId,
-    hook: hook as HookName,
-    cwd,
-    project: basename(cwd.replace(/[\/\\]+$/, '')) || cwd,
-    ts: Date.now(),
-  }
-  if (typeof p.message === 'string' && p.message.length > 0) ev.message = p.message
-  if (typeof p.tool_name === 'string' && p.tool_name.length > 0) ev.tool = p.tool_name
   // detectSurfaceForHook gates the host-app process walk on the hook name itself,
   // so PreToolUse (and every other non-SessionStart hook) never pays for it. The
   // walk's own deadline is the sooner of its local WALK_DEADLINE_MS allowance and
   // whatever's left of the process-wide DEADLINE, so a slow readStdin above
   // shortens the walk rather than the walk adding to an already-spent budget.
-  if (ev.hook === 'SessionStart') {
+  let surface: Surface | undefined
+  if (hook === 'SessionStart') {
     const walkDeadline = Math.min(Date.now() + WALK_DEADLINE_MS, DEADLINE)
-    ev.surface = detectSurfaceForHook(ev.hook, process.env, undefined, walkDeadline)
+    surface = detectSurfaceForHook(hook, process.env, undefined, walkDeadline)
   }
-  return ev
+
+  return normalize(parsed, surface, Date.now())
 }
 
 function trySpawnEngine(): void {
   if (process.env.NUDGE_NO_SPAWN === '1') return
   try {
-    const child = spawn(process.execPath, [new URL('../../engine/dist/bin.js', import.meta.url).pathname], {
+    const engineBin = fileURLToPath(new URL('../../engine/dist/bin.js', import.meta.url))
+    const child = spawn(process.execPath, [engineBin], {
       detached: true, stdio: 'ignore',
     })
     child.on('error', () => {})

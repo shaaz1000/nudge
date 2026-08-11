@@ -6,7 +6,8 @@
     "./types": "./dist/types.js",
     "./paths": "./dist/paths.js",
     "./config": "./dist/config.js",
-    "./protocol": "./dist/protocol.js"
+    "./protocol": "./dist/protocol.js",
+    "./normalize": "./dist/normalize.js"
   },
   "engines": { "node": ">=22.5.0" },
   "scripts": { "build": "tsc --build" }
