@@ -42,6 +42,13 @@ import {
   activate, deactivate, clientOptionsFromConfig,
   type ExtensionSurface, type SessionQuickPickItem,
 } from '../src/extension.js'
+// Toaster itself is NOT mocked (only 'vscode' is) — activate() constructs a
+// real Toaster internally with no injection seam of its own (see toast.ts's
+// own test suite for that layer's coverage). Spying on the real prototype
+// method is how this file observes that the specific instance activate()
+// built was actually disposed, without adding a needless injection point to
+// extension.ts just to satisfy this one assertion.
+import { Toaster } from '../src/toast.js'
 
 const session = (over: Partial<SessionState> = {}): SessionState => ({
   sessionId: 's1', project: 'my-repo', cwd: '/a/my-repo',
@@ -510,20 +517,58 @@ describe('nudge.showList command', () => {
 })
 
 describe('deactivate', () => {
-  it('disposes the client, the status bar item, and every registered command — not merely runs without throwing', () => {
-    const { client } = makeClient()
-    const { surface, commands } = makeSurface()
+  it('disposes the client, the status bar item, the toaster, and every registered command — not merely runs without throwing', () => {
+    const toasterDisposeSpy = vi.spyOn(Toaster.prototype, 'dispose')
+    try {
+      const { client } = makeClient()
+      const { surface, commands } = makeSurface()
+      const { context } = makeContext()
+
+      activate(context, { client, surface })
+      expect(statusBarItem.dispose).not.toHaveBeenCalled()
+      expect(client.dispose).not.toHaveBeenCalled()
+      expect(toasterDisposeSpy).not.toHaveBeenCalled()
+
+      deactivate()
+
+      expect(client.dispose).toHaveBeenCalledTimes(1)
+      expect(statusBarItem.dispose).toHaveBeenCalledTimes(1)
+      expect(toasterDisposeSpy).toHaveBeenCalledTimes(1)
+      for (const cmd of commands.values()) expect(cmd.disposed).toBe(true)
+    } finally {
+      toasterDisposeSpy.mockRestore()
+    }
+  })
+
+  // Closes the loop on the assertion above: dispose() being *called* is not
+  // the same as it actually mattering. toast.ts:108 guards exactly this case
+  // (`if (this.#disposed) return`) — a toast shown before deactivate() can
+  // still have its action resolved well after, and the guard is what stops a
+  // stale "Go to it" from reaching focusSession()/executeCommand at all.
+  it('a toast\'s "Go to it" action is a no-op if it resolves after deactivate() has already disposed the toaster', async () => {
+    const { client, emit } = makeClient()
+    const { surface } = makeSurface({ folders: ['/a/my-repo'] })
     const { context } = makeContext()
+    vscodeMock.workspace.workspaceFolders = [{ uri: { fsPath: '/a/my-repo' } }]
+
+    let resolveChoice: ((choice: string | undefined) => void) | undefined
+    vscodeMock.window.showWarningMessage.mockImplementationOnce(
+      () => new Promise<string | undefined>(resolve => { resolveChoice = resolve }),
+    )
 
     activate(context, { client, surface })
-    expect(statusBarItem.dispose).not.toHaveBeenCalled()
-    expect(client.dispose).not.toHaveBeenCalled()
+    emit([session({ sessionId: 's1', cwd: '/a/my-repo' })])
+    expect(vscodeMock.window.showWarningMessage).toHaveBeenCalledTimes(1)
 
     deactivate()
+    // Isolate: only care what happens as a result of resolving below, not
+    // anything the render/activation path already did.
+    vscodeMock.commands.executeCommand.mockClear()
 
-    expect(client.dispose).toHaveBeenCalledTimes(1)
-    expect(statusBarItem.dispose).toHaveBeenCalledTimes(1)
-    for (const cmd of commands.values()) expect(cmd.disposed).toBe(true)
+    resolveChoice?.('Go to it')
+    await new Promise(r => setTimeout(r, 20))
+
+    expect(vscodeMock.commands.executeCommand).not.toHaveBeenCalled()
   })
 
   it('disposes the window-focus subscription', () => {
