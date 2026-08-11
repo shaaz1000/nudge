@@ -84,7 +84,7 @@ export class EngineClient {
       // arguments); a dead/missing engine surfaces asynchronously via
       // 'error' below. Guarded anyway so a platform quirk can never escape
       // as an uncaught exception into the extension host.
-      console.error('nudge vscode: failed to start connecting to engine', err)
+      console.error('nudge client: failed to start connecting to engine', err)
       this.#scheduleReconnect()
       return
     }
@@ -95,7 +95,7 @@ export class EngineClient {
     // (crashing the extension host) instead of emitting quietly — this
     // listener existing at all is the load-bearing part, not what it does.
     sock.on('error', err => {
-      console.error('nudge vscode: engine socket error', err)
+      console.error('nudge client: engine socket error', err)
     })
 
     sock.on('connect', () => {
@@ -116,7 +116,7 @@ export class EngineClient {
       try {
         frames = this.#dec.push(chunk as unknown as string)
       } catch (err) {
-        console.error('nudge vscode: failed to decode engine frame', err)
+        console.error('nudge client: failed to decode engine frame', err)
         return
       }
       for (const frame of frames) this.#onFrame(frame as ServerMessage)
@@ -159,7 +159,7 @@ export class EngineClient {
       try {
         cb(sessions)
       } catch (err) {
-        console.error('nudge vscode: onState listener threw', err)
+        console.error('nudge client: onState listener threw', err)
       }
     }
   }
@@ -170,7 +170,7 @@ export class EngineClient {
     try {
       sock.write(encode(msg))
     } catch (err) {
-      console.error('nudge vscode: failed to write to engine socket', err)
+      console.error('nudge client: failed to write to engine socket', err)
     }
   }
 
