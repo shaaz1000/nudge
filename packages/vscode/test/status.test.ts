@@ -166,17 +166,13 @@ describe('StatusBar', () => {
     expect(item.tooltip).toMatch(/not running/i)
   })
 
-  it('wires the click command to nudge.focusSession in every state', () => {
+  // render() never touches .command (see status.ts's constructor comment) —
+  // it is set exactly once, so this asserts that single fact rather than
+  // repeating an unchanging assertion across three render() calls.
+  it('wires the click command to nudge.focusSession once, in the constructor', () => {
     const item = makeItem()
-    const bar = new StatusBar(makeSurface(item))
+    new StatusBar(makeSurface(item))
 
-    bar.render([], false)
-    expect(item.command).toBe('nudge.focusSession')
-
-    bar.render([], true)
-    expect(item.command).toBe('nudge.focusSession')
-
-    bar.render([session()], true)
     expect(item.command).toBe('nudge.focusSession')
   })
 
@@ -210,15 +206,27 @@ describe('StatusBar', () => {
     expect(item.dispose).toHaveBeenCalledTimes(1)
   })
 
-  it('render() after dispose() does not resurrect the item', () => {
+  // Asserts the disposed-guard inside render() itself (status.ts:90's
+  // `if (this.#disposed) return`), not a constructor side effect: establish
+  // a known pre-dispose state, dispose, then call render() with an input
+  // that — if the guard were missing — would visibly change every one of
+  // text/tooltip/backgroundColor. A prior version of this test asserted
+  // only `item.show` call count, which render() never touches on any path
+  // (show() is called once, from the constructor); that assertion could
+  // not fail no matter what render() did after dispose().
+  it('render() after dispose() leaves text/tooltip/backgroundColor exactly as they were', () => {
     const item = makeItem()
     const bar = new StatusBar(makeSurface(item))
+    bar.render([], true) // pre-dispose state: nothing waiting
+    expect(item.text).toBe('$(bell) Nudge')
 
     bar.dispose()
+    // Without the disposed-guard, this would flip the item to the warning
+    // state ('$(bell-dot) Nudge 1', WARNING_BG, a tooltip naming the session).
     bar.render([session()], true)
 
-    // No second show() beyond the one from construction, and dispose was
-    // not called again — render() after dispose is simply a no-op.
-    expect(item.show).toHaveBeenCalledTimes(1)
+    expect(item.text).toBe('$(bell) Nudge')
+    expect(item.tooltip).toBe('Nothing waiting')
+    expect(item.backgroundColor).toBeUndefined()
   })
 })
