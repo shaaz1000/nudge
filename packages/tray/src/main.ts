@@ -96,12 +96,16 @@ function defaultSpawnEngine(): void {
   p.unref()
 }
 
+const CONNECTIVITY_POLL_MS = 5_000
+
 export interface MainDeps {
   appSurface?: AppSurface
   client?: EngineClientLike
   createTray?: (send: (msg: ClientMessage) => void, callbacks: TrayCallbacks) => TrayLike
   spawnEngine?: () => void
   openHistoryFolder?: (path: string) => void
+  /** Overrides the connectivity poll interval — tests only; production always uses CONNECTIVITY_POLL_MS. */
+  pollIntervalMs?: number
 }
 
 interface Disposable { dispose(): void }
@@ -178,15 +182,26 @@ export function main(deps: MainDeps = {}): void {
     // than it would be right.
     tray.render([], true)
 
+    let lastSessions: SessionState[] = []
     client.onState(sessions => {
+      lastSessions = sessions
       tray.render(sessions, client.connected)
       const waiting = sessions.filter(s => s.tier !== null).length
       console.error(`nudge tray: state — ${waiting} waiting, connected=${client.connected}`)
     })
 
+    // client.onState() only fires on a fresh broadcast — if the engine dies
+    // without ever sending one (a hard crash, not a graceful shutdown),
+    // nothing would otherwise tell the tray to stop showing stale "waiting"
+    // data. Mirrors the VS Code extension's identical fix
+    // (extension.ts's CONNECTIVITY_POLL_MS) for the exact same gap.
+    const pollTimer = setInterval(() => {
+      tray.render(lastSessions, client.connected)
+    }, deps.pollIntervalMs ?? CONNECTIVITY_POLL_MS)
+
     client.connect()
 
-    active = [client, tray]
+    active = [client, tray, { dispose: () => clearInterval(pollTimer) }]
   })
 
   surface.onBeforeQuit(() => {

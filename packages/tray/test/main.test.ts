@@ -162,6 +162,55 @@ describe('main: wiring', () => {
   })
 })
 
+describe('main: connectivity poll', () => {
+  // Mirrors the VS Code extension's own fix for the identical gap
+  // (extension.ts's CONNECTIVITY_POLL_MS / its doc's "Finding" comment):
+  // client.onState() only fires on a fresh broadcast from the engine. If the
+  // engine dies without ever sending one (a hard crash, not a graceful
+  // shutdown), nothing would ever tell the tray to stop showing stale
+  // "waiting" data — the exact "never silently blank" failure Task 3's own
+  // brief calls out, just approached from the opposite direction (blank
+  // would at least be honest; confidently WRONG is worse).
+  it('re-renders to reflect a lost connection even with no fresh broadcast', async () => {
+    vi.useFakeTimers()
+    try {
+      const { surface, resolveReady } = makeSurface()
+      const { client, emit } = makeClient()
+      const { tray, renders } = makeTray()
+
+      main({ appSurface: surface, client, createTray: () => tray, pollIntervalMs: 10 })
+      resolveReady()
+      await vi.advanceTimersByTimeAsync(0)
+      emit([session({ cwd: '/a/my-repo' })])
+      expect(renders[renders.length - 1]).toEqual({ sessions: [session({ cwd: '/a/my-repo' })], connected: true })
+
+      client.connected = false
+      await vi.advanceTimersByTimeAsync(10)
+
+      expect(renders[renders.length - 1].connected).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('cancels the poll timer on before-quit (clearInterval), not just a no-op on future ticks', async () => {
+    const clearSpy = vi.spyOn(global, 'clearInterval')
+    const { surface, resolveReady, fireBeforeQuit } = makeSurface()
+    const { client } = makeClient()
+    const { tray } = makeTray()
+
+    main({ appSurface: surface, client, createTray: () => tray, pollIntervalMs: 10 })
+    resolveReady()
+    await new Promise(r => setTimeout(r, 0))
+    const callsBefore = clearSpy.mock.calls.length
+
+    fireBeforeQuit()
+
+    expect(clearSpy.mock.calls.length).toBeGreaterThan(callsBefore)
+    clearSpy.mockRestore()
+  })
+})
+
 describe('main: before-quit disposal', () => {
   // Disposal must be PROVEN, not merely "ran without throwing" — a missing
   // dispose assertion was Phase 2's ninth vacuous test (per the Phase 3
