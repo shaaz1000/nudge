@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { claudeSettingsPath } from '@nudge/shared/paths'
@@ -23,6 +23,33 @@ function installService(): void {
   }
   const p = spawn(unit.installCmd[0], unit.installCmd.slice(1), { stdio: 'inherit' })
   p.on('error', e => console.log(`Could not register the service: ${e.message}`))
+}
+
+/**
+ * Finding I6: `nudge uninstall` removed only the Claude Code hooks, leaving
+ * the LaunchAgent/systemd unit/Scheduled Task that `setup`'s installService()
+ * registered fully in place — so the engine kept auto-starting on every
+ * login regardless of "uninstall". Mirrors installService(): run the
+ * platform's own unregister command, then remove the unit file it wrote.
+ * Best-effort and non-fatal by design (matching installService()'s own
+ * `p.on('error', ...)` — a spawn failure there only logs) — a machine that
+ * never had the service registered (no service manager, or setup never
+ * ran) must not make `uninstall` fail outright over hooks it successfully
+ * removed.
+ */
+function uninstallService(): void {
+  const unit = serviceUnit(process.platform, process.execPath, ENGINE_BIN)
+  if (!unit) return
+  const p = spawn(unit.uninstallCmd[0], unit.uninstallCmd.slice(1), { stdio: 'inherit' })
+  p.on('error', e => console.log(`Could not unregister the service: ${e.message}`))
+  p.on('exit', () => {
+    if (!unit.path) return
+    try {
+      if (existsSync(unit.path)) rmSync(unit.path)
+    } catch (e) {
+      console.log(`Could not remove ${unit.path}: ${(e as Error).message}`)
+    }
+  })
 }
 
 function spawnEngine(): void {
@@ -58,27 +85,30 @@ try {
       const path = claudeSettingsPath()
       if (!existsSync(path)) {
         console.log(`No settings file at ${path}; nothing to uninstall.`)
-        break
-      }
+      } else {
+        let existing: unknown
+        try {
+          existing = JSON.parse(readFileSync(path, 'utf8'))
+        } catch (err) {
+          throw new Error(
+            `Refusing to touch ${path}: could not parse it as JSON (${(err as Error).message}). ` +
+            `Fix or move the file, then re-run uninstall.`,
+          )
+        }
 
-      let existing: unknown
-      try {
-        existing = JSON.parse(readFileSync(path, 'utf8'))
-      } catch (err) {
-        throw new Error(
-          `Refusing to touch ${path}: could not parse it as JSON (${(err as Error).message}). ` +
-          `Fix or move the file, then re-run uninstall.`,
-        )
+        // Validated (removeHooks throws on a non-object top level) before anything
+        // is backed up or written — the same care applySetup takes.
+        const { merged, removed } = removeHooks(existing)
+        const backup = backupSettings(path)
+        const serialized = JSON.stringify(merged, null, 2) + '\n'
+        JSON.parse(serialized)   // validate before it ever reaches disk
+        writeFileSync(path, serialized, 'utf8')
+        console.log(`Removed ${removed} Nudge hook(s). Backup: ${backup ?? '(none)'}`)
       }
-
-      // Validated (removeHooks throws on a non-object top level) before anything
-      // is backed up or written — the same care applySetup takes.
-      const { merged, removed } = removeHooks(existing)
-      const backup = backupSettings(path)
-      const serialized = JSON.stringify(merged, null, 2) + '\n'
-      JSON.parse(serialized)   // validate before it ever reaches disk
-      writeFileSync(path, serialized, 'utf8')
-      console.log(`Removed ${removed} Nudge hook(s). Backup: ${backup ?? '(none)'}`)
+      // Finding I6: unregister the service unconditionally — setup() installs
+      // it independently of whether hooks were present above, so uninstall
+      // must reverse it independently too.
+      uninstallService()
       break
     }
     case 'start':  await cmdStart(spawnEngine); break
