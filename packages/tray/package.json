@@ -1,0 +1,21 @@
+{
+  "name": "nudge-tray",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "engines": { "node": ">=22.5.0" },
+  "scripts": {
+    "build": "tsc --build",
+    "bundle": "esbuild src/index.ts --bundle --outfile=dist/index.cjs --platform=node --format=cjs --external:electron --target=node20",
+    "start": "npm run bundle && electron ."
+  },
+  "dependencies": {
+    "@nudge/client": "0.1.0",
+    "@nudge/shared": "0.1.0"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "esbuild": "^0.21.5"
+  }
+}
