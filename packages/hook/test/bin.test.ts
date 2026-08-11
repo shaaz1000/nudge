@@ -76,7 +76,11 @@ describe('hook binary contract', () => {
   it('completes well inside the 500ms budget with no engine', async () => {
     const started = Date.now()
     await invoke({ NUDGE_NO_SPAWN: '1' })
-    expect(Date.now() - started).toBeLessThan(2000)
+    // Finding I8(a): this asserted < 2000 while guarding a 500ms contract —
+    // a run 3.9x over budget (1900ms) still passed. Real measured cost is
+    // 36-52ms, so < 500 is stable with ~10x headroom and actually catches a
+    // regression against the contract this test exists to enforce.
+    expect(Date.now() - started).toBeLessThan(500)
   })
 
   it('ignores a hook it does not subscribe to', async () => {
@@ -125,10 +129,13 @@ describe('hook binary contract', () => {
     const elapsed = Date.now() - started
 
     expect(stdout).toBe('')
-    // Generous margin for `node`'s own process-startup overhead (unrelated to the
-    // hook's internal budget); a real `ps`-backed walk normally adds only single-
-    // digit-to-low-double-digit ms on top of that.
-    expect(elapsed).toBeLessThan(2000)
+    // Finding I8(a): this asserted < 2000 while guarding a 500ms contract —
+    // a run 3.9x over budget (1900ms) still passed. Real measured cost
+    // (node's own process-startup overhead plus a real `ps`-backed walk,
+    // which normally adds only single-digit-to-low-double-digit ms) is
+    // 36-52ms, so < 500 is stable with ~10x headroom and actually catches a
+    // regression against the contract this test exists to enforce.
+    expect(elapsed).toBeLessThan(500)
     // Proves the walk actually ran (not that nothing happened): the spooled event
     // carries a surface fingerprinted from this sandbox's real ancestor chain.
     const files = readdirSync(join(home, 'spool'))

@@ -86,12 +86,29 @@ describe('session TTL', () => {
     expect(store.get('s1')).toBeDefined()
   })
 
-  it('drops rather than stalls when both thresholds have passed', () => {
+  /**
+   * Finding I8(b): the original version of this test called wd.tick() once
+   * at t=900_001 (past stallAfterMs only) — which already marked the
+   * session 'stalled' — before advancing to t=86_400_001+900_001 and
+   * ticking again. By that second, "combined" tick, the session's status
+   * was already 'stalled', not 'running', so the stall loop's own
+   * `s.status !== 'running'` guard skipped it regardless of which loop ran
+   * first. The assertion passed even with the two loops in tick() swapped
+   * (confirmed: reverting the swap after checking is the actual fix — see
+   * the fix report for the before/after run).
+   *
+   * This version advances straight to a point past *both* thresholds in
+   * one jump and ticks exactly once, so the session is still 'running' at
+   * the moment tick() runs — nothing has touched it before now. That
+   * makes the ordering actually observable: if the stall loop ran first,
+   * this still-'running', still-silent-past-stallAfterMs session would
+   * get marked stalled and fire onStall in this same tick (even though
+   * it's also old enough to be dropped a few lines later in the same
+   * call) — which is exactly the bug this test exists to catch.
+   */
+  it('drops rather than stalls when both thresholds have passed in the same tick', () => {
     store.apply(ev('SessionStart'))
-    clock.advance(900_001)
-    wd.tick()
-    stalls.length = 0
-    clock.advance(86_400_001)
+    clock.advance(86_400_001) // past both stallAfterMs (900_000) and sessionTtlMs (86_400_000)
     wd.tick()
     expect(store.get('s1')).toBeUndefined()
     expect(stalls).toHaveLength(0)
