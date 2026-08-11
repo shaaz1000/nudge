@@ -43,6 +43,7 @@
     "package": "vsce package --no-dependencies"
   },
   "dependencies": {
+    "@nudge/client": "0.1.0",
     "@nudge/shared": "0.1.0"
   },
   "devDependencies": {
