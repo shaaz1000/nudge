@@ -35,7 +35,14 @@ Claude Code                 nudge-hook               nudge-engine
 - **`nudge-engine`** is the daemon. It tracks every session's state (running,
   blocked, idle, stalled), fires the local desktop alert immediately, and — if
   nobody responds — escalates to your phone through a pluggable channel after
-  a delay that adapts to whether you're actually at your machine.
+  a fixed delay (`escalation.activeDelayMs`, 3 minutes by default). The
+  engine's escalation math (`escalateDelayFor`) already has an idle-aware
+  path that would shorten this once it knows you've stepped away, but nothing
+  in Phase 1 ever reports idle time to it — the socket protocol has an `idle`
+  message and `nudge-engine` can consume one, but no client sends it yet.
+  That's an editor-integration or tray-app job, arriving in Phase 2; until
+  then the delay is the same fixed 3 minutes whether you're at your desk or
+  not.
 - **`nudge`** is the CLI: install/uninstall the hooks, start the engine,
   check status, list what's waiting, snooze or mute, send a test push.
 
@@ -289,14 +296,22 @@ These are real limits, not caveats to skim past — you will hit them.
   `PreToolUse` for `AskUserQuestion` (and `ExitPlanMode`) as the start of a
   `blocked` wait in its own right; this is the whole reason the hook
   subscribes to `PreToolUse` at all, not just to `Notification`.
-- **Two `nudge start` invocations within milliseconds can both spawn an
-  engine.** `nudge start` guards against double-starting by probing the
-  socket first and only spawning if nothing answers — but the probe and the
-  spawn aren't atomic, so two near-simultaneous invocations can both see
-  "nothing answered" and both spawn. In practice this needs a tight race
-  (e.g. two terminals or a script launching `nudge start` back-to-back); a
-  normal login-service start is not affected. The planned fix is an
-  exclusive lockfile; it isn't built yet.
+- **Sleep/wake detection may be a no-op on Windows.** After a laptop-lid-close
+  or a big clock jump, the engine re-arms every still-waiting session's
+  escalation ladder from now rather than firing off a timer that was
+  scheduled before the jump (see `onResume()` / `DriftDetector`). Detecting
+  the jump compares a monotonic clock (`performance.now()`) against wall
+  clock time: a gap between them means time passed that the monotonic clock
+  didn't count, i.e. a suspend. That holds on Linux, where
+  `CLOCK_MONOTONIC` excludes suspended time by design. It is not guaranteed
+  on Windows: `performance.now()` there is commonly backed by
+  QueryPerformanceCounter, which on many systems keeps ticking through
+  sleep — if so, the monotonic and wall deltas stay in lockstep across a
+  suspend, no gap ever appears, and the detector simply never fires for the
+  literal scenario (closing the lid) it exists to catch. This has only been
+  verified against a synthetic clock in tests, not a real Windows sleep/wake
+  cycle — treat it as unverified on that platform until someone spikes it on
+  real hardware.
 
 ## Development
 
