@@ -14,6 +14,24 @@ import { Engine } from './engine.js'
 import { drainSpool } from './drain.js'
 import { DriftDetector } from './drift.js'
 
+/**
+ * Finding C1 (part 3): the last unguarded path. Every handler this daemon
+ * runs already catches and logs rather than letting an exception escape
+ * (server.ts's #handle and its `error` listener, watchdog.ts, drift.ts,
+ * Engine#onLocal/#onPhone) — but nothing caught anything that slipped past
+ * all of those, so a single one still took the whole process down (see the
+ * C1 finding for the exact TypeError this produced from a missing `ts`).
+ * These two are the final backstop: whatever gets here, log it and keep
+ * running. A daemon whose entire job is noticing problems must not itself
+ * disappear silently over one bad event.
+ */
+process.on('uncaughtException', err => {
+  console.error('nudge engine: uncaught exception', err)
+})
+process.on('unhandledRejection', err => {
+  console.error('nudge engine: unhandled rejection', err)
+})
+
 const cfg = loadConfig()
 const clock = new SystemClock()
 const store = new SessionStore(cfg, clock)

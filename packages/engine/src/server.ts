@@ -4,6 +4,7 @@ import { dirname } from 'node:path'
 import type { NudgeEvent, SessionState } from '@nudge/shared/types'
 import { encode, NdjsonDecoder, type ClientMessage } from '@nudge/shared/protocol'
 import { socketPath } from '@nudge/shared/paths'
+import { isValidEvent } from '@nudge/shared/normalize'
 
 export interface ServerHandlers {
   onEvent(ev: NudgeEvent): void
@@ -78,35 +79,66 @@ export class EngineServer {
     try { sock.write(encode(msg)) } catch { /* peer vanished */ }
   }
 
+  /**
+   * Finding C1: this used to dispatch straight into `this.h.*` with no
+   * try/catch and no validation of the wire payload. A single malformed
+   * `event` message (e.g. missing `ts` — a version-skewed hook/engine pair,
+   * or a corrupted spool file) reached `Db.recordEvent`'s SQLite bind
+   * unguarded and threw, and with nothing catching it here, that exception
+   * propagated out of the socket's `data` handler and crashed the whole
+   * daemon (uncaught exception, exit 1) — taking every other session's
+   * ladder down with it. Every other handler in this codebase (watchdog,
+   * drift, Engine#onLocal/#onPhone, and this class's own `server.on('error',
+   * ...)`) already follows the convention of catching and logging rather
+   * than letting an exception escape; this was the one place that didn't.
+   *
+   * Two independent layers now guard against that: `isValidEvent` rejects a
+   * malformed `event` payload before it ever reaches the store or the DB,
+   * and the try/catch is defense in depth against anything else that
+   * throws (a SQLite I/O error from `recordEvent`/`openWait`/`closeWait`, a
+   * misbehaving handler) — the same "log it, keep the daemon alive" rule
+   * bin.ts's process-level `uncaughtException`/`unhandledRejection`
+   * listeners enforce one level up.
+   */
   #handle(sock: Socket, m: ClientMessage): void {
-    switch (m?.t) {
-      case 'event':    this.h.onEvent(m.event); return
-      case 'idle':     this.h.onIdle(m.idleMs); return
-      case 'frontmost': this.h.onFrontmost(m.sessionId); return
-      case 'ping':     this.#reply(sock, { t: 'ok', id: m.id }); return
-      case 'list':     this.#reply(sock, { t: 'ok', id: m.id, data: this.h.onList() }); return
-      case 'subscribe':
-        this.#subscribers.add(sock)
-        this.#reply(sock, { t: 'ok', id: m.id })
-        return
-      case 'snooze':
-        this.h.onSnooze(m.sessionId, m.ms)
-        this.#reply(sock, { t: 'ok', id: m.id })
-        return
-      case 'mute':
-        this.h.onMute(m.on)
-        this.#reply(sock, { t: 'ok', id: m.id })
-        return
-      case 'resolve':
-        this.h.onResolve(m.sessionId)
-        this.#reply(sock, { t: 'ok', id: m.id })
-        return
-      default:
-        this.#reply(sock, {
-          t: 'err',
-          id: (m as { id?: number })?.id ?? 0,
-          message: `unknown message type: ${String((m as { t?: string })?.t)}`,
-        })
+    try {
+      switch (m?.t) {
+        case 'event':
+          if (!isValidEvent(m.event)) {
+            console.error('nudge server: dropping malformed event', m.event)
+            return
+          }
+          this.h.onEvent(m.event)
+          return
+        case 'idle':     this.h.onIdle(m.idleMs); return
+        case 'frontmost': this.h.onFrontmost(m.sessionId); return
+        case 'ping':     this.#reply(sock, { t: 'ok', id: m.id }); return
+        case 'list':     this.#reply(sock, { t: 'ok', id: m.id, data: this.h.onList() }); return
+        case 'subscribe':
+          this.#subscribers.add(sock)
+          this.#reply(sock, { t: 'ok', id: m.id })
+          return
+        case 'snooze':
+          this.h.onSnooze(m.sessionId, m.ms)
+          this.#reply(sock, { t: 'ok', id: m.id })
+          return
+        case 'mute':
+          this.h.onMute(m.on)
+          this.#reply(sock, { t: 'ok', id: m.id })
+          return
+        case 'resolve':
+          this.h.onResolve(m.sessionId)
+          this.#reply(sock, { t: 'ok', id: m.id })
+          return
+        default:
+          this.#reply(sock, {
+            t: 'err',
+            id: (m as { id?: number })?.id ?? 0,
+            message: `unknown message type: ${String((m as { t?: string })?.t)}`,
+          })
+      }
+    } catch (err) {
+      console.error('nudge server: handler failed', err)
     }
   }
 

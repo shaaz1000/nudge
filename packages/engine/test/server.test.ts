@@ -130,6 +130,98 @@ describe('EngineServer', () => {
     s.end()
   })
 
+  // Finding C1: a malformed `event` message (missing `ts`, missing
+  // `sessionId`, a wrong type, or not an object at all) used to flow
+  // straight into `this.h.onEvent(m.event)` with no validation. In the real
+  // engine that reaches `Db.recordEvent`'s SQLite bind unguarded and throws
+  // `TypeError: Provided value cannot be bound to SQLite parameter 1` —
+  // uncaught, that took the whole daemon down (exit 1), silencing every
+  // other session's ladder along with it. These tests exercise the same
+  // path C1 actually broke: a real socket, a message from `onEvent`'s
+  // caller (#handle) rather than a hand-crafted Transition or NudgeEvent
+  // passed directly to a component that already trusts its shape.
+  describe('malformed events (C1)', () => {
+    const send = (s: Socket, raw: unknown) => s.write(encode(raw))
+
+    it('does not crash the process, and stays responsive to a later valid event, on an event missing ts', async () => {
+      const { s, next } = await client()
+      send(s, { t: 'event', event: { source: 'claude-code', sessionId: 's1', hook: 'Notification', cwd: '/a/my-repo', project: 'my-repo' } })
+      await new Promise(r => setTimeout(r, 50))
+      expect(received).toHaveLength(0) // the malformed event never reached the handler
+
+      s.write(encode({ t: 'ping', id: 1 }))
+      expect(await next()).toMatchObject({ t: 'ok', id: 1 })
+
+      const ev: NudgeEvent = {
+        source: 'claude-code', sessionId: 's2', hook: 'Notification',
+        cwd: '/a/my-repo', project: 'my-repo', ts: 1, message: 'Allow?',
+      }
+      s.write(encode({ t: 'event', event: ev }))
+      await vi.waitFor(() => expect(received).toHaveLength(1))
+      expect(received[0].sessionId).toBe('s2')
+      s.end()
+    })
+
+    it('drops an event with a missing sessionId without crashing', async () => {
+      const { s, next } = await client()
+      send(s, { t: 'event', event: { source: 'claude-code', hook: 'Notification', cwd: '/a/my-repo', project: 'my-repo', ts: 1 } })
+      s.write(encode({ t: 'ping', id: 2 }))
+      expect(await next()).toMatchObject({ t: 'ok', id: 2 })
+      expect(received).toHaveLength(0)
+      s.end()
+    })
+
+    it('drops an event whose hook is not one Nudge subscribes to', async () => {
+      const { s, next } = await client()
+      send(s, { t: 'event', event: { source: 'claude-code', sessionId: 's1', hook: 'SubagentStop', cwd: '/a/my-repo', project: 'my-repo', ts: 1 } })
+      s.write(encode({ t: 'ping', id: 3 }))
+      expect(await next()).toMatchObject({ t: 'ok', id: 3 })
+      expect(received).toHaveLength(0)
+      s.end()
+    })
+
+    it('drops a non-object event payload (null, a string, a number, an array)', async () => {
+      const { s, next } = await client()
+      for (const bad of [null, 'nope', 42, []]) {
+        send(s, { t: 'event', event: bad })
+      }
+      s.write(encode({ t: 'ping', id: 4 }))
+      expect(await next()).toMatchObject({ t: 'ok', id: 4 })
+      expect(received).toHaveLength(0)
+      s.end()
+    })
+
+    it('survives a handler that throws synchronously and stays responsive', async () => {
+      const throwingServer = new EngineServer({
+        onEvent: () => { throw new Error('boom') },
+        onList: () => [session()],
+        onSnooze: vi.fn(), onMute: vi.fn(), onResolve: vi.fn(), onIdle: vi.fn(), onFrontmost: vi.fn(),
+      })
+      const throwingSock = join(dir, 'throwing.sock')
+      await throwingServer.listen(throwingSock)
+      try {
+        const s = connect(throwingSock)
+        await new Promise<void>(r => s.on('connect', r))
+        s.setEncoding('utf8')
+        const dec = new NdjsonDecoder()
+        const replyPromise = new Promise(resolve => {
+          s.on('data', chunk => { for (const m of dec.push(chunk as unknown as string)) resolve(m) }
+          )
+        })
+        const ev: NudgeEvent = {
+          source: 'claude-code', sessionId: 's1', hook: 'Notification',
+          cwd: '/a/my-repo', project: 'my-repo', ts: 1,
+        }
+        s.write(encode({ t: 'event', event: ev }))
+        s.write(encode({ t: 'ping', id: 1 }))
+        expect(await replyPromise).toMatchObject({ t: 'ok', id: 1 })
+        s.end()
+      } finally {
+        await throwingServer.close()
+      }
+    })
+  })
+
   it.skipIf(process.platform === 'win32')('creates the socket with 0600 permissions', () => {
     expect(statSync(sock).mode & 0o777).toBe(0o600)
   })
