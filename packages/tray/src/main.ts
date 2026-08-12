@@ -9,7 +9,7 @@ import type { ClientMessage } from '@nudge/shared/protocol'
 import { NudgeTray, type TrayCallbacks } from './tray.js'
 import { Notifier } from './notify.js'
 import { focusSession } from './focus.js'
-import { AttentionManager, defaultSurface as defaultAttentionSurface } from './attention.js'
+import { AttentionManager, defaultSurface as defaultAttentionSurface, loadAttentionConfig } from './attention.js'
 
 // esbuild's CJS output (used for the real, runnable app — see package.json's
 // `bundle` script) zeroes out `import.meta` entirely ("import.meta is not
@@ -248,7 +248,7 @@ export function main(deps: MainDeps = {}): void {
     // which is the exact failure this product exists to fix.
     const attention: AttentionLike = deps.createAttention
       ? deps.createAttention()
-      : new AttentionManager(defaultAttentionSurface())
+      : new AttentionManager(defaultAttentionSurface(), loadAttentionConfig())
 
     let lastSessions: SessionState[] = []
     client.onState(sessions => {
@@ -271,6 +271,13 @@ export function main(deps: MainDeps = {}): void {
     // (extension.ts's CONNECTIVITY_POLL_MS) for the exact same gap.
     const pollTimer = setInterval(() => {
       tray.render(lastSessions, client.connected)
+      // Attention is driven from the poll too, not just from broadcasts. If
+      // the engine dies mid-wait it will never broadcast the resolve, and a
+      // Dock icon bouncing on state the tray can no longer trust cannot be
+      // stopped by anything short of quitting Nudge. Treating "disconnected"
+      // as "nothing waiting" clears it; the next broadcast after a reconnect
+      // starts it again if the wait is still real.
+      attention.update(client.connected ? lastSessions : [])
     }, deps.pollIntervalMs ?? CONNECTIVITY_POLL_MS)
 
     client.connect()

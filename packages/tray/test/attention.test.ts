@@ -30,17 +30,23 @@ vi.mock('electron', () => ({
 
 import type { SessionState } from '@nudge/shared/types'
 import { DEFAULT_CONFIG, type NudgeConfig } from '@nudge/shared/config'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   AttentionManager,
   DEFAULT_ATTENTION_CONFIG,
   DEFAULT_BOUNCE_TIERS,
   isSessionSuppressed,
   isTierEligible,
+  lazyFlashWindow,
+  loadAttentionConfig,
   needsAttention,
   type AttentionConfig,
   type AttentionSurface,
   type DockSurface,
   type FlashSurface,
+  type FlashWindowLike,
 } from '../src/attention.js'
 
 const session = (over: Partial<SessionState> = {}): SessionState => ({
@@ -91,6 +97,68 @@ describe('DEFAULT_BOUNCE_TIERS: tiers that escalate under DEFAULT_CONFIG', () =>
   it('excludes idle-short and stalled — a Turn-finished ping must not persistently bounce the Dock', () => {
     expect(DEFAULT_BOUNCE_TIERS.has('idle-short')).toBe(false)
     expect(DEFAULT_BOUNCE_TIERS.has('stalled')).toBe(false)
+  })
+})
+
+describe('loadAttentionConfig: the user-facing off switch (Step 6)', () => {
+  // Review finding 5: bounceOnBlocked existed as a type but nothing could set
+  // it, so the user could not turn off the bounce without a rebuild. These
+  // write to a temp file — never the real ~/.nudge/config.json.
+  const write = (obj: unknown): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'nudge-tray-cfg-'))
+    const p = join(dir, 'config.json')
+    writeFileSync(p, JSON.stringify(obj), 'utf8')
+    return p
+  }
+
+  it('defaults when the config file does not exist', () => {
+    expect(loadAttentionConfig(join(tmpdir(), 'nudge-does-not-exist', 'config.json')))
+      .toEqual(DEFAULT_ATTENTION_CONFIG)
+  })
+
+  it('defaults when the file exists but has no tray key — the engine\'s own config is untouched', () => {
+    expect(loadAttentionConfig(write({ muted: true, retentionDays: 7 }))).toEqual(DEFAULT_ATTENTION_CONFIG)
+  })
+
+  it('turns the bounce off — the switch the user actually asked for', () => {
+    const c = loadAttentionConfig(write({ tray: { bounceOnBlocked: false } }))
+    expect(c.bounceOnBlocked).toBe(false)
+    expect(isTierEligible(c, 'blocked')).toBe(false)
+  })
+
+  it('narrows bounceTiers to just the named tiers', () => {
+    const c = loadAttentionConfig(write({ tray: { bounceTiers: ['blocked'] } }))
+    expect(isTierEligible(c, 'blocked')).toBe(true)
+    expect(isTierEligible(c, 'idle-long')).toBe(false)
+  })
+
+  it('an empty bounceTiers array really does disable every tier', () => {
+    const c = loadAttentionConfig(write({ tray: { bounceTiers: [] } }))
+    for (const t of ['blocked', 'idle-long', 'idle-short', 'stalled'] as const) {
+      expect(isTierEligible(c, t)).toBe(false)
+    }
+  })
+
+  // Fails loud, matching the shared config's rule. A silently ignored typo in
+  // an off switch is worse than no switch: the user believes they disabled
+  // something that is still bouncing at them.
+  it('throws on an unknown tray key rather than ignoring it', () => {
+    expect(() => loadAttentionConfig(write({ tray: { bounceOnBlockd: false } })))
+      .toThrow(/unknown key "tray.bounceOnBlockd"/)
+  })
+
+  it('throws on a misspelled tier name', () => {
+    expect(() => loadAttentionConfig(write({ tray: { bounceTiers: ['blocked', 'idle_long'] } })))
+      .toThrow(/unknown tier/)
+  })
+
+  it('throws when bounceOnBlocked is not a boolean', () => {
+    expect(() => loadAttentionConfig(write({ tray: { bounceOnBlocked: 'no' } })))
+      .toThrow(/must be a boolean/)
+  })
+
+  it('throws when tray is not an object', () => {
+    expect(() => loadAttentionConfig(write({ tray: 'off' }))).toThrow(/must be an object/)
   })
 })
 
@@ -152,6 +220,58 @@ describe('isSessionSuppressed: pure — mirrors packages/engine/src/suppression.
 
   it('not suppressed when nothing is reported frontmost (null)', () => {
     expect(isSessionSuppressed(cfg(), session({ sessionId: 's1' }), 100, null)).toBe(false)
+  })
+})
+
+describe('isSessionSuppressed: tier-disabled — the engine applies `enabled` at alert time, not when assigning tier', () => {
+  // Review finding 1. The engine's localSuppression checks
+  // `cfg.tiers[tier].enabled` FIRST; the tray originally dropped that clause,
+  // so a user who turned `blocked` off got silence from the engine and a
+  // bouncing Dock from the tray. The broadcast still carries tier:'blocked'
+  // for a disabled tier (engine/src/state.ts assigns tier unconditionally),
+  // so nothing else would have caught this.
+  it('a session whose tier the user has disabled is suppressed', () => {
+    const c = cfg()
+    c.tiers.blocked.enabled = false
+    expect(isSessionSuppressed(c, session({ tier: 'blocked' }), 100, null)).toBe(true)
+  })
+
+  it('disabling a DIFFERENT tier does not suppress this one', () => {
+    const c = cfg()
+    c.tiers['idle-long'].enabled = false
+    expect(isSessionSuppressed(c, session({ tier: 'blocked' }), 100, null)).toBe(false)
+  })
+
+  // Found by the live Electron probe, which crashed here: a config whose
+  // `tiers` map is missing an entry must not read as "disabled" (which a bare
+  // `!cfg.tiers[t].enabled` would give), and must not throw either — the
+  // throw escaped update() and would have taken the tray icon and the
+  // notifications down with it.
+  it('a config missing the tier entry neither suppresses nor throws', () => {
+    const c = { ...cfg(), tiers: {} } as unknown as NudgeConfig
+    expect(() => isSessionSuppressed(c, session({ tier: 'blocked' }), 100, null)).not.toThrow()
+    expect(isSessionSuppressed(c, session({ tier: 'blocked' }), 100, null)).toBe(false)
+  })
+
+  it('a throw while evaluating attention never escapes update() into the broadcast handler', () => {
+    const { surface } = makeDockSurface()
+    const exploding = { get muted(): boolean { throw new Error('config exploded') } } as unknown as NudgeConfig
+    const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, {
+      loadConfig: () => exploding, now: () => 100,
+    })
+
+    expect(() => attn.update([session({ tier: 'blocked' })])).not.toThrow()
+  })
+
+  it('a disabled tier never bounces the Dock end-to-end', () => {
+    const { surface, bounce } = makeDockSurface()
+    const c = cfg()
+    c.tiers.blocked.enabled = false
+    const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: () => c, now: () => 100 })
+
+    attn.update([session({ tier: 'blocked' })])
+
+    expect(bounce).not.toHaveBeenCalled()
   })
 })
 
@@ -410,6 +530,174 @@ describe('AttentionManager: Windows/Linux taskbar flash (Steps 3-4)', () => {
     attn.update([session({ tier: 'blocked' })])
 
     expect(flash).not.toHaveBeenCalled()
+  })
+})
+
+describe('AttentionManager: a broken config must never strand a bouncing icon', () => {
+  // Review finding 2. loadConfig genuinely throws (malformed JSON, EACCES).
+  // The first version logged and returned early, which froze #attracting at
+  // true — so the icon kept bouncing forever once the user had answered. The
+  // whole point of Step 2 reached through the error path instead of the
+  // happy path.
+  it('still cancels the bounce when the config goes unreadable mid-wait', () => {
+    const { surface, cancelBounce, hide } = makeDockSurface()
+    let broken = false
+    const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, {
+      loadConfig: () => { if (broken) throw new Error('EACCES: permission denied'); return cfg() },
+      now: () => 100,
+    })
+
+    attn.update([session({ tier: 'blocked' })])
+    broken = true
+    attn.update([]) // the wait resolved, but the config can no longer be read
+
+    expect(cancelBounce).toHaveBeenCalledTimes(1)
+    expect(hide).toHaveBeenCalledTimes(1)
+  })
+
+  it('does nothing at all when the very first config read fails — no last-known-good to fall back to', () => {
+    const { surface, show, bounce } = makeDockSurface()
+    const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, {
+      loadConfig: () => { throw new Error('unparseable') },
+      now: () => 100,
+    })
+
+    expect(() => attn.update([session({ tier: 'blocked' })])).not.toThrow()
+    expect(show).not.toHaveBeenCalled()
+    expect(bounce).not.toHaveBeenCalled()
+  })
+})
+
+describe('AttentionManager: a throwing surface must not wedge the manager', () => {
+  it('does not claim to be bouncing when bounce() throws — a later resolve has nothing to cancel', () => {
+    const dock: DockSurface = {
+      show: vi.fn(), hide: vi.fn(),
+      bounce: vi.fn(() => { throw new Error('dock is gone') }),
+      cancelBounce: vi.fn(),
+    }
+    const surface: AttentionSurface = { platform: 'darwin', dock, flashWindow: null }
+    const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
+
+    expect(() => attn.update([session({ tier: 'blocked' })])).not.toThrow()
+    attn.update([])
+
+    // Never started, so nothing to stop: a cancelBounce here would be against
+    // a bounce id that was never returned.
+    expect(dock.cancelBounce).not.toHaveBeenCalled()
+  })
+
+  it('retries on the next update after a failed start rather than giving up for good', () => {
+    let fail = true
+    const dock: DockSurface = {
+      show: vi.fn(), hide: vi.fn(),
+      bounce: vi.fn(() => { if (fail) throw new Error('transient'); return 7 }),
+      cancelBounce: vi.fn(),
+    }
+    const surface: AttentionSurface = { platform: 'darwin', dock, flashWindow: null }
+    const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
+
+    attn.update([session({ tier: 'blocked' })])
+    fail = false
+    attn.update([session({ tier: 'blocked' })])
+
+    expect(dock.bounce).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('lazyFlashWindow: the Windows/Linux path (Steps 3-4), driven through an injected window factory', () => {
+  function makeWin() {
+    let destroyed = false
+    const w: FlashWindowLike = {
+      isDestroyed: () => destroyed,
+      showInactive: vi.fn(),
+      minimize: vi.fn(),
+      flashFrame: vi.fn(),
+      destroy: vi.fn(() => { destroyed = true }),
+    }
+    return w
+  }
+
+  it('shows the window INACTIVE and minimizes it before flashing — a focus-stealing window would be worse than no flash', () => {
+    const w = makeWin()
+    const calls: string[] = []
+    const tracked: FlashWindowLike = {
+      isDestroyed: () => w.isDestroyed(),
+      showInactive: () => { calls.push('showInactive') },
+      minimize: () => { calls.push('minimize') },
+      flashFrame: () => { calls.push('flashFrame') },
+      destroy: () => { calls.push('destroy') },
+    }
+    const surface = lazyFlashWindow(() => tracked)
+
+    surface.flash(true)
+
+    // Order matters: flashFrame against a window with no taskbar button is a
+    // silent no-op, which is what makes this whole path fail invisibly.
+    expect(calls).toEqual(['showInactive', 'minimize', 'flashFrame'])
+  })
+
+  it('reuses the same window across flashes instead of creating one per alert', () => {
+    const w = makeWin()
+    const make = vi.fn(() => w)
+    const surface = lazyFlashWindow(make)
+
+    surface.flash(true)
+    surface.flash(false)
+    surface.flash(true)
+
+    expect(make).toHaveBeenCalledTimes(1)
+  })
+
+  it('creates no window at all until something actually needs flashing', () => {
+    const make = vi.fn(makeWin)
+    lazyFlashWindow(make)
+    expect(make).not.toHaveBeenCalled()
+  })
+
+  it('turning the flash off before one was ever raised does not build a window', () => {
+    const make = vi.fn(makeWin)
+    const surface = lazyFlashWindow(make)
+    surface.flash(false)
+    expect(make).not.toHaveBeenCalled()
+  })
+
+  it('rebuilds after the window is destroyed out from under it', () => {
+    const first = makeWin()
+    const second = makeWin()
+    const make = vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second)
+    const surface = lazyFlashWindow(make)
+
+    surface.flash(true)
+    first.destroy()
+    surface.flash(true)
+
+    expect(make).toHaveBeenCalledTimes(2)
+    expect(second.flashFrame).toHaveBeenCalledWith(true)
+  })
+
+  it('destroys a half-built window when showInactive throws, rather than keeping one that silently never flashes', () => {
+    const w = makeWin()
+    w.showInactive = vi.fn(() => { throw new Error('no display server') })
+    const make = vi.fn(() => w)
+    const surface = lazyFlashWindow(make)
+
+    expect(() => surface.flash(true)).not.toThrow()
+
+    expect(w.destroy).toHaveBeenCalledTimes(1)
+    // And the next attempt must build a fresh one rather than no-op forever
+    // against the broken window.
+    const w2 = makeWin()
+    make.mockReturnValue(w2)
+    surface.flash(true)
+    expect(w2.flashFrame).toHaveBeenCalledWith(true)
+  })
+
+  it('dispose() destroys the window it created', () => {
+    const w = makeWin()
+    const surface = lazyFlashWindow(() => w)
+    surface.flash(true)
+    surface.dispose?.()
+    expect(w.destroy).toHaveBeenCalledTimes(1)
   })
 })
 

@@ -435,6 +435,56 @@ describe('main: attention wiring (Task 7)', () => {
     expect(dispose).toHaveBeenCalledTimes(1)
   })
 
+  /**
+   * Review finding 4. If the engine dies mid-wait it never broadcasts the
+   * resolve, so nothing driven only by `onState` can ever stop. A Dock icon
+   * bouncing on state the tray can no longer trust is unstoppable short of
+   * quitting Nudge — the poll is the only thing that notices.
+   */
+  it('the connectivity poll clears attention when the engine goes away mid-wait', async () => {
+    const { surface, resolveReady } = makeSurface()
+    const { client, emit } = makeClient()
+    const { tray } = makeTray()
+    const { createNotifier } = makeNotifier()
+    const { createAttention, updates } = makeAttention()
+
+    main({
+      appSurface: surface, client, createTray: () => tray, createNotifier, createAttention,
+      focusSession: vi.fn(), pollIntervalMs: 5,
+    })
+    resolveReady()
+    await new Promise(r => setTimeout(r, 0))
+
+    emit([session({ tier: 'blocked' })])
+    expect(updates.at(-1)).toHaveLength(1)
+
+    client.connected = false
+    await new Promise(r => setTimeout(r, 20))
+
+    expect(updates.at(-1)).toEqual([])
+  })
+
+  it('the poll keeps feeding the real sessions while the engine is still reachable', async () => {
+    const { surface, resolveReady } = makeSurface()
+    const { client, emit } = makeClient()
+    const { tray } = makeTray()
+    const { createNotifier } = makeNotifier()
+    const { createAttention, updates } = makeAttention()
+
+    main({
+      appSurface: surface, client, createTray: () => tray, createNotifier, createAttention,
+      focusSession: vi.fn(), pollIntervalMs: 5,
+    })
+    resolveReady()
+    await new Promise(r => setTimeout(r, 0))
+
+    emit([session({ tier: 'blocked' })])
+    await new Promise(r => setTimeout(r, 20))
+
+    // Still connected, so the poll must NOT clear a genuinely waiting session.
+    expect(updates.at(-1)).toHaveLength(1)
+  })
+
   it('a second instance never builds an attention manager at all', async () => {
     const { surface } = makeSurface({ locked: false })
     const { client } = makeClient()
