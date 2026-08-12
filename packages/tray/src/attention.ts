@@ -96,7 +96,13 @@ export function loadAttentionConfig(path = configPath()): AttentionConfig {
 
 /** The macOS Dock methods this module touches. macOS-only in Electron's API — `app.dock` is undefined elsewhere. */
 export interface DockSurface {
-  show(): void
+  /**
+   * The real `app.dock.show()` is **async** — it resolves once the icon is
+   * actually in the Dock. Bouncing before then is a race against an icon that
+   * may not exist yet, so `AttentionManager` waits when a promise comes back.
+   * Returning `void` is still allowed so plain synchronous fakes work.
+   */
+  show(): void | Promise<void>
   hide(): void
   /** Returns an id that must be handed back to `cancelBounce` to stop the animation. */
   bounce(type: 'critical' | 'informational'): number
@@ -124,6 +130,10 @@ export interface AttentionDeps {
    */
   loadConfig?: () => NudgeConfig
   now?: () => number
+}
+
+function isPromise(v: unknown): v is Promise<void> {
+  return typeof (v as Promise<void> | undefined)?.then === 'function'
 }
 
 export function isTierEligible(cfg: AttentionConfig, tier: Tier): boolean {
@@ -300,13 +310,9 @@ export function defaultSurface(deps: DefaultSurfaceDeps = {}): AttentionSurface 
     return {
       platform,
       dock: {
-        show: () => {
-          // `app.dock.show()` returns a Promise; an unhandled rejection in
-          // the main process must not be the way we find that out.
-          void dock.show().catch((err: Error) => {
-            console.error(`nudge tray: could not show the Dock icon: ${err.message}`)
-          })
-        },
+        // Returned, not swallowed: AttentionManager waits on it before
+        // bouncing, so the icon is actually in the Dock first.
+        show: () => dock.show(),
         hide: () => dock.hide(),
         bounce: type => dock.bounce(type),
         cancelBounce: id => dock.cancelBounce(id),
@@ -338,6 +344,7 @@ export class AttentionManager {
   readonly #loadConfig: () => NudgeConfig
   readonly #now: () => number
   #lastGoodConfig: NudgeConfig | null = null
+  #gen = 0
   #bounceId: number | null = null
   #attracting = false
   #disposed = false
@@ -399,11 +406,25 @@ export class AttentionManager {
 
   #start(): void {
     const dock = this.#dock()
+    // Bumped on every start and stop so a bounce that was queued behind an
+    // async show() can tell whether the wait it belonged to is still current.
+    const gen = ++this.#gen
     let shown = false
     try {
       if (dock) {
-        dock.show()
+        const showing = dock.show()
         shown = true
+        if (isPromise(showing)) {
+          // The real Dock resolves this once the icon exists. Bouncing before
+          // that is a race against an icon that may not be there yet.
+          this.#attracting = true
+          void showing
+            .catch((err: Error) => {
+              console.error(`nudge tray: could not show the Dock icon: ${err.message}`)
+            })
+            .then(() => { this.#bounceOnce(gen, dock) })
+          return
+        }
         // 'critical' bounces until the app is activated; 'informational' is a
         // single hop that is over before the user turns around, which defeats
         // the entire point of this module.
@@ -428,11 +449,37 @@ export class AttentionManager {
   }
 
   /**
+   * Raises the bounce once an async `show()` has settled — but only if the
+   * wait it belongs to is still the current one. Without the generation
+   * check, a wait that resolved while `show()` was still in flight would
+   * start bouncing *after* the user had already answered, with no matching
+   * `#stop()` left to cancel it: a permanently bouncing icon reached through
+   * the async path rather than the missing-cancel one.
+   */
+  #bounceOnce(gen: number, dock: DockSurface): void {
+    if (gen !== this.#gen || this.#disposed || !this.#attracting) return
+    try {
+      this.#bounceId = dock.bounce('critical')
+    } catch (err) {
+      console.error(`nudge tray: could not raise persistent attention: ${(err as Error).message}`)
+    }
+  }
+
+  /**
    * The load-bearing half. Without the `cancelBounce` below, the icon keeps
    * bouncing after the user has already answered — turning the product's best
    * signal into the reason it gets uninstalled.
+   *
+   * Verified against the real macOS Dock (macOS 26.5): the bounce visibly
+   * stops on `cancelBounce` while the app is still running and the icon is
+   * still in the Dock. Note the id really is `0` there — Apple documents 0 as
+   * "request refused", but on this platform it is a valid id that cancels
+   * correctly, so the return value must not be treated as a success signal.
    */
   #stop(): void {
+    // Bumped so any bounce still queued behind an async show() is abandoned
+    // rather than starting after this stop.
+    this.#gen++
     // Cleared first so a throw below cannot wedge the manager into believing
     // it is still bouncing (which would block every future stop attempt).
     this.#attracting = false

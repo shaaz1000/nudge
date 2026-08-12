@@ -440,6 +440,93 @@ describe('AttentionManager: cancel on resolve — load-bearing (Step 2)', () => 
   })
 })
 
+describe('AttentionManager: the real dock.show() is async (found live, not by tests)', () => {
+  /** A dock whose show() resolves only when the test says so. */
+  function deferredDock() {
+    let release!: () => void
+    const gate = new Promise<void>(r => { release = r })
+    const dock: DockSurface = {
+      show: vi.fn(() => gate),
+      hide: vi.fn(),
+      bounce: vi.fn(() => 0),
+      cancelBounce: vi.fn(),
+    }
+    const surface: AttentionSurface = { platform: 'darwin', dock, flashWindow: null }
+    return { surface, dock, release }
+  }
+
+  it('waits for show() to resolve before bouncing — the icon must exist first', async () => {
+    const { surface, dock, release } = deferredDock()
+    const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
+
+    attn.update([session({ tier: 'blocked' })])
+    expect(dock.show).toHaveBeenCalledTimes(1)
+    expect(dock.bounce).not.toHaveBeenCalled() // still in flight
+
+    release()
+    await Promise.resolve(); await Promise.resolve()
+
+    expect(dock.bounce).toHaveBeenCalledWith('critical')
+  })
+
+  /**
+   * The nasty one. If the wait resolves while show() is still in flight, a
+   * naive implementation bounces *after* the user has already answered — and
+   * because #stop() already ran, nothing is left to cancel it. A permanently
+   * bouncing icon reached through the async path instead of the missing-cancel
+   * path this task was built around.
+   */
+  it('abandons the bounce when the wait resolves before show() settles', async () => {
+    const { surface, dock, release } = deferredDock()
+    const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
+
+    attn.update([session({ tier: 'blocked' })])
+    attn.update([]) // answered while the Dock was still appearing
+    release()
+    await Promise.resolve(); await Promise.resolve()
+
+    expect(dock.bounce).not.toHaveBeenCalled()
+  })
+
+  it('abandons the bounce when disposed before show() settles', async () => {
+    const { surface, dock, release } = deferredDock()
+    const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
+
+    attn.update([session({ tier: 'blocked' })])
+    attn.dispose()
+    release()
+    await Promise.resolve(); await Promise.resolve()
+
+    expect(dock.bounce).not.toHaveBeenCalled()
+  })
+
+  it('still bounces when show() rejects — a failed show must not cost the nudge', async () => {
+    const dock: DockSurface = {
+      show: vi.fn(() => Promise.reject(new Error('dock busy'))),
+      hide: vi.fn(), bounce: vi.fn(() => 0), cancelBounce: vi.fn(),
+    }
+    const surface: AttentionSurface = { platform: 'darwin', dock, flashWindow: null }
+    const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
+
+    attn.update([session({ tier: 'blocked' })])
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve()
+
+    expect(dock.bounce).toHaveBeenCalledWith('critical')
+  })
+
+  it('cancels the id from an async bounce once it finally arrives', async () => {
+    const { surface, dock, release } = deferredDock()
+    const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
+
+    attn.update([session({ tier: 'blocked' })])
+    release()
+    await Promise.resolve(); await Promise.resolve()
+    attn.update([])
+
+    expect(dock.cancelBounce).toHaveBeenCalledWith(0)
+  })
+})
+
 describe('AttentionManager: suppression — same rules as every other local alert (Step 5)', () => {
   it('a globally muted session never bounces the Dock at all', () => {
     const { surface, show, bounce } = makeDockSurface()
