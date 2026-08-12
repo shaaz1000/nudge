@@ -236,6 +236,30 @@ describe('AttentionManager: cancel on resolve — load-bearing (Step 2)', () => 
     expect(hide).toHaveBeenCalledTimes(1)
   })
 
+  /**
+   * Regression, found by live-probing the real Electron Dock (not by this
+   * suite): `app.dock.bounce('critical')` returns **0** for the first bounce
+   * of a process. `makeDockSurface` above starts its ids at 1, so a
+   * truthiness guard (`if (this.#bounceId)`) instead of an explicit
+   * `!== null` passes every other test in this file while never cancelling
+   * the very first bounce in production — the exact forever-bouncing icon
+   * this whole task exists to prevent.
+   */
+  it('cancels a bounce id of 0 — the id real Electron returns first, which a truthiness guard would skip', () => {
+    const zeroDock = {
+      show: vi.fn(), hide: vi.fn(),
+      bounce: vi.fn(() => 0),
+      cancelBounce: vi.fn(),
+    }
+    const surface: AttentionSurface = { platform: 'darwin', dock: zeroDock, flashWindow: null }
+    const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
+
+    attn.update([session({ tier: 'blocked' })])
+    attn.update([])
+
+    expect(zeroDock.cancelBounce).toHaveBeenCalledWith(0)
+  })
+
   it('does NOT cancel or hide while a different session is still waiting', () => {
     const { surface, cancelBounce, hide } = makeDockSurface()
     const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
