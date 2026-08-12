@@ -18,6 +18,11 @@ below to build and install it, and [Limitations](#limitations) for what's
 still missing (the OS-level desktop notification itself still isn't
 clickable — that's Phase 3's tray app).
 
+> **Installing for the first time?** [**INSTALL.md**](INSTALL.md) is a
+> complete from-scratch guide: prerequisites, build, hooks, engine, ntfy on
+> your phone (including why the topic name is effectively a password), the
+> desktop app, what gets written where, and troubleshooting.
+
 ## How it works
 
 ```
