@@ -404,10 +404,18 @@ npm run dist -w nudge-tray   # installer for the CURRENT platform
 Windows, `.AppImage` on Linux. Cross-building the Windows and Linux targets
 needs Wine/Docker and is not set up here.
 
-**The build is unsigned.** Signing macOS builds needs a paid Apple Developer
-account, which this project does not have, so Gatekeeper quarantines the
-`.dmg` and macOS reports that the app "is damaged" or "cannot be opened".
-Clear the quarantine flag:
+**The build is ad-hoc signed, not Developer-ID signed.** The build re-signs
+the bundle itself (`scripts/adhoc-sign.mjs`), which is not cosmetic:
+electron-builder's `identity: null` only *skips* signing, leaving Electron's
+own signature, which no longer matches the rebuilt bundle. An app in that
+state **will not launch from Finder and cannot post a single notification** —
+and both failures are silent. You get the sound and the Dock bounce, and no
+banner telling you what is actually being asked.
+
+Ad-hoc signing does not make it distributable. Signing for other machines
+needs a paid Apple Developer account, which this project does not have, so
+Gatekeeper still quarantines the `.dmg` and macOS reports that the app "is
+damaged" or "cannot be opened". Clear the quarantine flag:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/Nudge.app

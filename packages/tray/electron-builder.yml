@@ -63,6 +63,12 @@ extraResources:
 # environment when someone runs `npm run dist`.
 publish: never
 
+# Ad-hoc sign the macOS bundle after packing. `mac.identity: null` below only
+# SKIPS signing — it leaves Electron's own signature, which no longer matches
+# the rebuilt bundle, and the result neither launches from Finder nor posts a
+# single notification. Both failures are completely silent. See the script.
+afterPack: scripts/adhoc-sign.mjs
+
 mac:
   category: public.app-category.developer-tools
   target:
