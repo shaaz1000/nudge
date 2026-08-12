@@ -83,6 +83,10 @@ const server = new EngineServer({
   onResolve: id => engine.resolve(id),
   onIdle: ms => engine.setIdle(ms),
   onFrontmost: id => engine.setFrontmost(id),
+  // Finding 5: the moment the last GUI (tray) client disconnects, resume real
+  // desktop notifications for every still-waiting session rather than
+  // silently relying on the next scheduled escalation repeat.
+  onGuiDisconnected: () => engine.onGuiDisconnected(),
 })
 
 const drift = new DriftDetector({

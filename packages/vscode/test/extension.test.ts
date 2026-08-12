@@ -94,10 +94,10 @@ function makeSurface(opts: { folders?: string[]; focused?: boolean } = {}) {
   const commands = new Map<string, FakeCommand>()
   const windowStateHandlers: Array<(e: { focused: boolean }) => void> = []
   const windowStateDisposed = { value: false }
-  const showQuickPick = vi.fn<[SessionQuickPickItem[], unknown], Promise<SessionQuickPickItem | undefined>>()
+  const showQuickPick = vi.fn<(items: SessionQuickPickItem[], opts?: unknown) => Promise<SessionQuickPickItem | undefined>>()
     .mockResolvedValue(undefined)
   const showInformationMessage = vi.fn().mockResolvedValue(undefined)
-  const configGet = vi.fn((_k: string, def: unknown) => def)
+  const configGet = <T,>(_k: string, def: T): T => def
 
   const surface: ExtensionSurface = {
     workspaceFolderPaths: () => opts.folders ?? [],

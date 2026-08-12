@@ -160,7 +160,7 @@ describe('UNKNOWN_SURFACE is not shared between sessions', () => {
   })
 
   it('freezes UNKNOWN_SURFACE so an in-place mutation throws instead of corrupting every session', () => {
-    expect(() => { (UNKNOWN_SURFACE as Record<string, unknown>).tty = 'x' }).toThrow()
+    expect(() => { (UNKNOWN_SURFACE as unknown as Record<string, unknown>).tty = 'x' }).toThrow()
   })
 })
 

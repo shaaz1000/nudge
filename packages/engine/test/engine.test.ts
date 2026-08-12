@@ -18,6 +18,15 @@ import type { NudgeConfig } from '@nudge/shared/config'
 
 let dir: string, clock: FakeClock, db: Db, engine: Engine
 let local: string[], phone: string[]
+/**
+ * Round 2, Finding 1: tracks calls to `notifier.alertSound()` separately
+ * from `local` (which tracks full `notifier.alert()` calls — banner +
+ * sound together, the no-GUI path). Only exercised by the "Finding 5"
+ * describe block below, which toggles a real GUI connection; every other
+ * fixture's `server.hasGuiClient()` stub is hardcoded `false`, so
+ * `alertSound()` is never reached there.
+ */
+let soundOnly: string[]
 
 const ev = (hook: HookName, extra: Partial<NudgeEvent> = {}): NudgeEvent => ({
   source: 'claude-code', sessionId: 's1', hook,
@@ -28,10 +37,13 @@ function build(over: Record<string, unknown> = {}, extraDeps: Record<string, unk
   const cfg = mergeConfig({ channel: { id: 'test', options: {} }, ...over }) as NudgeConfig
   clock = new FakeClock(0)
   db = new Db(join(dir, 'e.db'))
-  local = []; phone = []
+  local = []; phone = []; soundOnly = []
 
   const store = new SessionStore(cfg, clock)
-  const notifier = { alert: (s: { project: string }, tier: string) => local.push(`${s.project}:${tier}`) }
+  const notifier = {
+    alert: (s: { project: string }, tier: string) => local.push(`${s.project}:${tier}`),
+    alertSound: (tier: string) => soundOnly.push(tier),
+  }
   const dispatcher = new Dispatcher(cfg, clock, async () => ({
     id: 'test', configSchema: {},
     send: async (a: { project: string; tier: string }) => { phone.push(`${a.project}:${a.tier}`) },
@@ -43,7 +55,11 @@ function build(over: Record<string, unknown> = {}, extraDeps: Record<string, unk
     onPhone: (s, t) => { void engine.onPhone(s, t) },
   })
   const watchdog = new Watchdog(cfg, clock, store, t => engine.onWatchdogStall(t))
-  const server = { broadcast: vi.fn(), listen: vi.fn(), close: vi.fn() }
+  // hasGuiClient: () => false — Finding 5's onLocal gate calls this on every
+  // local-alert check; every test in this file assumes no GUI is connected
+  // (real GUI-gating behaviour is covered separately, see engine.test.ts's
+  // "Finding 5" describe block below).
+  const server = { broadcast: vi.fn(), listen: vi.fn(), close: vi.fn(), hasGuiClient: () => false }
 
   engine = new Engine({
     cfg, clock, store, db, escalator, dispatcher,
@@ -153,7 +169,7 @@ describe('end-to-end within the engine', () => {
       cfg, clock, store, db, escalator, dispatcher,
       notifier: { alert: () => {} } as never,
       watchdog: new Watchdog(cfg, clock, store, () => {}),
-      server: { broadcast: vi.fn(), listen: vi.fn(), close: vi.fn() } as never,
+      server: { broadcast: vi.fn(), listen: vi.fn(), close: vi.fn(), hasGuiClient: () => false } as never,
     })
     engine.handle(ev('Notification', { message: 'Allow?' }))
     clock.advance(180_001)
@@ -268,6 +284,191 @@ describe('shutdown and suppression against an in-flight ladder', () => {
 })
 
 /**
+ * Review round 1, Finding 5 (USER-APPROVED): with a GUI client (the Electron
+ * tray) connected, the engine must skip its own local desktop notification —
+ * the tray shows its own clickable one instead — but fall back to its own
+ * notification the INSTANT no GUI client is connected (including right after
+ * one disconnects or crashes), and phone escalation / DB history must be
+ * completely unaffected either way. This uses a REAL EngineServer bound to a
+ * real socket (not the `{ hasGuiClient: () => false }` stub `build()` uses
+ * for every other test in this file) so the whole stack — wire protocol
+ * (`subscribe({gui:true})`) -> server (`#guiSubscribers`) -> engine
+ * (`onLocal`'s gate) — is proven end to end, not just Engine's own gate in
+ * isolation.
+ */
+describe('engine defers to a connected GUI client (Finding 5)', () => {
+  let sockPath: string
+  let realServer: EngineServer
+
+  beforeEach(() => { sockPath = join(dir, 'gui.sock') })
+  afterEach(async () => { await realServer?.close() })
+
+  function buildWithRealServer() {
+    const cfg = mergeConfig({ channel: { id: 'test', options: {} } }) as NudgeConfig
+    clock = new FakeClock(0)
+    db = new Db(join(dir, 'gui.db'))
+    local = []; phone = []; soundOnly = []
+    const store = new SessionStore(cfg, clock)
+    const notifier = {
+      // Full alert (banner + sound) — the no-GUI path.
+      alert: (s: { project: string }, tier: string) => local.push(`${s.project}:${tier}`),
+      // Sound only — round 2, Finding 1's fix, taken while a GUI is
+      // connected and the banner is left to the tray's own Notifier.
+      alertSound: (tier: string) => soundOnly.push(tier),
+    }
+    const dispatcher = new Dispatcher(cfg, clock, async () => ({
+      id: 'test', configSchema: {},
+      send: async (a: { project: string; tier: string }) => { phone.push(`${a.project}:${a.tier}`) },
+    }))
+    const escalator = new Escalator({
+      cfg, clock, idleMs: () => 0,
+      onLocal: (s, t) => engine.onLocal(s, t),
+      onPhone: (s, t) => { void engine.onPhone(s, t) },
+    })
+    const watchdog = new Watchdog(cfg, clock, store, t => engine.onWatchdogStall(t))
+    realServer = new EngineServer({
+      onEvent: e => engine.handle(e),
+      onList: () => engine.sessions(),
+      onSnooze: (id, ms) => engine.snooze(id, ms),
+      onMute: on => engine.mute(on),
+      onResolve: id => engine.resolve(id),
+      onIdle: ms => engine.setIdle(ms),
+      onFrontmost: id => engine.setFrontmost(id),
+      onGuiDisconnected: () => engine.onGuiDisconnected(),
+    })
+    engine = new Engine({
+      cfg, clock, store, db, escalator, dispatcher,
+      notifier: notifier as never, watchdog, server: realServer,
+    })
+    return { store }
+  }
+
+  /** Connects, subscribes (optionally as a GUI), and waits for the server to have processed it. */
+  async function subscribeGui(gui: boolean): Promise<import('node:net').Socket> {
+    const sock = connect(sockPath)
+    await new Promise<void>(resolve => sock.on('connect', resolve))
+    sock.write(encode({ t: 'subscribe', id: 1, gui }))
+    await vi.waitFor(() => expect(realServer.hasGuiClient()).toBe(gui))
+    return sock
+  }
+
+  it('GUI connected -> no engine banner at t=0, but the per-tier sound still fires (round 2, Finding 1)', async () => {
+    buildWithRealServer()
+    await realServer.listen(sockPath)
+    const guiSock = await subscribeGui(true)
+
+    engine.handle(ev('Notification', { message: 'Allow Bash?' }))
+    expect(local).toEqual([]) // no banner: the tray's own clickable Notifier shows one instead
+    expect(soundOnly).toEqual(['blocked']) // but the configured sound for this tier still plays
+
+    guiSock.destroy()
+  })
+
+  it('GUI disconnects -> banner resumes immediately, not just on the next scheduled repeat', async () => {
+    buildWithRealServer()
+    await realServer.listen(sockPath)
+    const guiSock = await subscribeGui(true)
+
+    engine.handle(ev('Notification', { message: 'Allow Bash?' }))
+    expect(local).toEqual([]) // suppressed while the GUI is connected
+    expect(soundOnly).toEqual(['blocked']) // the sound is not
+
+    guiSock.destroy()
+    await vi.waitFor(() => expect(realServer.hasGuiClient()).toBe(false))
+    // onGuiDisconnected re-runs onLocal for every still-waiting session the
+    // instant the last GUI vanishes — no need to advance the clock to the
+    // next localRepeatIntervalMs boundary (default 60s) to see it resume.
+    await vi.waitFor(() => expect(local).toEqual(['my-repo:blocked']))
+  })
+
+  it('the escalation ladder\'s local repeats stay audible (sound-only) for the whole time a GUI is connected', async () => {
+    buildWithRealServer()
+    await realServer.listen(sockPath)
+    const guiSock = await subscribeGui(true)
+
+    engine.handle(ev('Notification', { message: 'Allow Bash?' }))
+    expect(soundOnly).toEqual(['blocked']) // t=0
+
+    // Default cfg: localRepeat=3 every localRepeatIntervalMs=60s, so t=60s
+    // and t=120s are two more repeats — well short of activeDelayMs=180s,
+    // so phone escalation cannot have fired yet and isn't muddying this.
+    clock.advance(60_000)
+    await vi.waitFor(() => expect(soundOnly).toEqual(['blocked', 'blocked']))
+    clock.advance(60_000)
+    await vi.waitFor(() => expect(soundOnly).toEqual(['blocked', 'blocked', 'blocked']))
+
+    expect(local).toEqual([]) // the banner never fired even once across all three repeats
+    expect(phone).toEqual([]) // and phone escalation hasn't kicked in yet either
+
+    guiSock.destroy()
+  })
+
+  it('two GUIs connected -> still no banner (sound still fires); only disconnecting BOTH resumes the banner', async () => {
+    buildWithRealServer()
+    await realServer.listen(sockPath)
+    const a = await subscribeGui(true)
+    const b = connect(sockPath)
+    await new Promise<void>(resolve => b.on('connect', resolve))
+    b.write(encode({ t: 'subscribe', id: 2, gui: true }))
+    await vi.waitFor(() => expect(realServer.hasGuiClient()).toBe(true))
+
+    engine.handle(ev('Notification', { message: 'Allow Bash?' }))
+    expect(local).toEqual([])
+    expect(soundOnly).toEqual(['blocked'])
+
+    a.destroy()
+    await new Promise(r => setTimeout(r, 50))
+    expect(realServer.hasGuiClient()).toBe(true) // b is still connected
+    expect(local).toEqual([]) // still suppressed
+
+    b.destroy()
+    await vi.waitFor(() => expect(realServer.hasGuiClient()).toBe(false))
+    await vi.waitFor(() => expect(local).toEqual(['my-repo:blocked']))
+  })
+
+  it('phone escalation is entirely unaffected by a connected GUI (only the local banner is gated)', async () => {
+    buildWithRealServer()
+    await realServer.listen(sockPath)
+    const guiSock = await subscribeGui(true)
+
+    engine.handle(ev('Notification', { message: 'Allow Bash?' }))
+    expect(local).toEqual([]) // local banner suppressed
+    expect(phone).toEqual([])
+
+    clock.advance(180_001)
+    await vi.waitFor(() => expect(phone).toEqual(['my-repo:blocked'])) // phone escalation fires regardless
+
+    guiSock.destroy()
+  })
+
+  it('DB wait-history recording is entirely unaffected by a connected GUI', async () => {
+    const { store } = buildWithRealServer()
+    await realServer.listen(sockPath)
+    const guiSock = await subscribeGui(true)
+
+    engine.handle(ev('Notification', { message: 'Allow Bash?' }))
+    expect(local).toEqual([]) // local banner suppressed
+    expect(db.openWaits()).toHaveLength(1) // history is not
+
+    clock.advance(10_000)
+    engine.handle(ev('PostToolUse', { tool: 'Bash', ts: clock.now() }))
+    expect(db.openWaits()).toHaveLength(0)
+    expect(db.waitsSince(0)[0].resolvedBy).toBe('PostToolUse')
+    expect(store.get('s1')?.tier).toBeNull() // resolved and cleared, same as with no GUI connected
+
+    guiSock.destroy()
+  })
+
+  it('no GUI ever connected -> behaves exactly like before this fix (local banner fires normally)', async () => {
+    buildWithRealServer()
+    await realServer.listen(sockPath)
+
+    engine.handle(ev('Notification', { message: 'Allow Bash?' }))
+    expect(local).toEqual(['my-repo:blocked'])
+  })
+})
+
+/**
  * Finding I7: `nudge mute` only ever flipped `cfg.muted` on the engine's
  * in-memory config object — nothing wrote it to config.json. `nudge status`
  * re-reads config.json fresh in a separate process on every invocation, so
@@ -318,7 +519,11 @@ describe('watchdog TTL drop cleanup (I1)', () => {
       t => engine.onWatchdogStall(t),
       id => engine.onWatchdogDrop(id),
     )
-    const server = { broadcast: vi.fn(), listen: vi.fn(), close: vi.fn() }
+    // hasGuiClient: () => false — Finding 5's onLocal gate calls this on every
+  // local-alert check; every test in this file assumes no GUI is connected
+  // (real GUI-gating behaviour is covered separately, see engine.test.ts's
+  // "Finding 5" describe block below).
+  const server = { broadcast: vi.fn(), listen: vi.fn(), close: vi.fn(), hasGuiClient: () => false }
     engine = new Engine({
       cfg, clock, store, db, escalator, dispatcher,
       notifier: { alert: () => {} } as never, watchdog, server: server as never,
@@ -370,7 +575,11 @@ describe('periodic retention pruning via the watchdog (I2)', () => {
       id => engine.onWatchdogDrop(id),
       () => engine.onWatchdogPrune(),
     )
-    const server = { broadcast: vi.fn(), listen: vi.fn(), close: vi.fn() }
+    // hasGuiClient: () => false — Finding 5's onLocal gate calls this on every
+  // local-alert check; every test in this file assumes no GUI is connected
+  // (real GUI-gating behaviour is covered separately, see engine.test.ts's
+  // "Finding 5" describe block below).
+  const server = { broadcast: vi.fn(), listen: vi.fn(), close: vi.fn(), hasGuiClient: () => false }
     engine = new Engine({
       cfg, clock, store, db, escalator, dispatcher,
       notifier: { alert: () => {} } as never, watchdog, server: server as never,

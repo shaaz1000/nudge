@@ -1,0 +1,96 @@
+appId: com.nudge.tray
+productName: Nudge
+copyright: Nudge
+
+# Pinned explicitly: this is an npm-workspaces monorepo, so `electron` is
+# hoisted to the ROOT node_modules and electron-builder cannot find it under
+# packages/tray to infer a version. Without this it fails outright with
+# "Cannot compute electron version from installed node modules". Kept in step
+# with the `electron` devDependency by `npm run check-electron-pin`, which
+# `pack`/`dist` run first.
+#
+# Must bundle Node >= 22.5: the tray spawns the engine with
+# ELECTRON_RUN_AS_NODE=1, i.e. under ELECTRON'S OWN Node, and the engine's
+# event log uses the built-in `node:sqlite` module. Electron 33 shipped Node
+# 20.18.3, where that module does not exist — so "Start engine" failed with
+# ERR_UNKNOWN_BUILTIN_MODULE on every build, packaged or not. Electron 43
+# bundles Node 24.
+electronVersion: 43.4.0
+
+directories:
+  output: release
+  buildResources: build
+
+# dist/ only — src/ is deliberately NOT shipped. That is exactly why
+# ASSETS_DIR resolves to dist/assets and the build has a copy-assets step:
+# the icons have to live inside the build output to survive packaging.
+# package.json is required for Electron to find "main".
+files:
+  - dist/index.cjs
+  - dist/assets/**
+  - package.json
+
+# The bundle is self-contained (esbuild inlines @nudge/client and
+# @nudge/shared, with only `electron` left external), so no node_modules
+# needs shipping. asar keeps it to a single archive.
+asar: true
+
+# The app has NO runtime dependencies — esbuild inlines @nudge/client and
+# @nudge/shared into dist/index.cjs, leaving only `electron` external, and
+# Electron supplies that itself. Without this, electron-builder runs a
+# production-only `npm install` in the package before building, which in this
+# workspace prunes devDependencies — including electron-builder's own
+# app-builder-bin — and the build then dies with a confusing ENOENT while
+# spawning a binary it just deleted from under itself.
+npmRebuild: false
+
+# The engine, bundled to a single self-contained script and placed OUTSIDE
+# the asar archive — a child process cannot read a script from inside one.
+# Without this, the tray's "Start engine" menu item (offered precisely when
+# the engine is unreachable) spawned a path that does not exist in the
+# packaged app: the spawn "succeeded", the child died with MODULE_NOT_FOUND
+# into stdio:'ignore', and the user got no feedback at all.
+# Laid out so the engine's own `join(import.meta.dirname, '..', 'assets')`
+# (desktop.ts, for its alert sounds) resolves: engine.mjs sits in
+# Resources/engine/ and the sounds in Resources/assets/.
+extraResources:
+  - from: dist/engine/engine.mjs
+    to: engine/engine.mjs
+  - from: dist/assets-engine
+    to: assets
+
+# Never attempt a release upload, even if GH_TOKEN happens to be set in the
+# environment when someone runs `npm run dist`.
+publish: never
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+  # LSUIElement: a menu-bar app with no permanent Dock icon. Task 7 makes the
+  # Dock icon appear only while something is waiting, and hides it again on
+  # resolve — a permanent icon would defeat that, and the bounce needs the
+  # icon to be absent first for its appearance to mean anything.
+  extendInfo:
+    LSUIElement: 1
+  # Unsigned: signing needs a paid Apple Developer account. Gatekeeper will
+  # quarantine the .dmg, so the README documents the right-click -> Open
+  # workaround honestly rather than pretending it installs cleanly.
+  identity: null
+
+win:
+  target:
+    - target: nsis
+      arch: [x64, arm64]
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+
+linux:
+  category: Development
+  target:
+    - target: AppImage
+      arch: [x64, arm64]

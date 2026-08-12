@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import type { SessionState, Tier } from '@nudge/shared/types'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
@@ -109,7 +110,7 @@ beforeEach(async () => {
   })
   engine = new Engine({
     cfg, clock, store, db, escalator, dispatcher,
-    notifier: { alert: (s, t) => local.push(`${s.project}:${t}`) } as never,
+    notifier: { alert: (s: SessionState, t: Tier) => local.push(`${s.project}:${t}`) } as never,
     watchdog: new Watchdog(cfg, clock, store, t => engine.onWatchdogStall(t)),
     server,
   })

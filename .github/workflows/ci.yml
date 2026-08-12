@@ -27,3 +27,19 @@ jobs:
       # fail at runtime, inside a real extension host, on someone's machine.
       - run: npm run bundle -w nudge-vscode
       - run: node packages/vscode/scripts/verify-bundle.mjs
+      # Same reasoning for the tray, which additionally ships ICONS and the
+      # ENGINE. Nothing in the unit suite touches the filesystem (every test
+      # injects a fake loadImage), so a missing icon or a dropped copy-assets
+      # step leaves the whole suite green and ships a blank menu-bar icon —
+      # which is exactly the defect ASSETS_DIR originally had.
+      - run: npm run bundle -w nudge-tray
+      - run: node packages/tray/scripts/verify-bundle.mjs
+      # The packaged app is built against whatever `electronVersion` the yml
+      # pins; if that drifts from the installed devDependency, the artefact is
+      # built on an Electron nobody tested.
+      - run: npm run check-electron-pin -w nudge-tray
+      # Type-check the TEST files too. Nothing else does: every package
+      # tsconfig is `include: src/**`, and vitest transpiles without checking,
+      # so `@ts-expect-error` guards in tests were inert and an interface
+      # change broke fakes at runtime rather than at compile time.
+      - run: npx tsc -p tsconfig.test.json

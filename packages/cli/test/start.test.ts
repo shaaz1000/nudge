@@ -31,7 +31,7 @@ describe('cmdStart single-instance guard', () => {
       const d = new NdjsonDecoder()
       s.setEncoding('utf8')
       s.on('data', chunk => {
-        for (const m of d.push(chunk as string)) {
+        for (const m of d.push(chunk as unknown as string)) {
           s.write(encode({ t: 'ok', id: (m as { id: number }).id }))
         }
       })

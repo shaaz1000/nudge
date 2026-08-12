@@ -1,0 +1,29 @@
+{
+  "name": "nudge-tray",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Nudge \u2014 tells you when Claude Code is waiting on you",
+  "author": "Nudge",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "copy-assets": "node -e \"const fs=require('node:fs');fs.rmSync('dist/assets',{recursive:true,force:true});fs.cpSync('src/assets','dist/assets',{recursive:true})\"",
+    "build": "tsc --build && npm run copy-assets",
+    "bundle": "esbuild src/index.ts --bundle --outfile=dist/index.cjs --platform=node --format=cjs --external:electron --target=node20 && npm run bundle:engine && npm run copy-assets",
+    "start": "npm run bundle && electron .",
+    "pack": "npm run check-electron-pin && npm run bundle && electron-builder --dir",
+    "dist": "npm run check-electron-pin && npm run bundle && electron-builder",
+    "bundle:engine": "esbuild ../engine/src/bin.ts --bundle --outfile=dist/engine/engine.mjs --platform=node --format=esm --target=node22 && node -e \"require('node:fs').cpSync('../engine/assets','dist/assets-engine',{recursive:true})\"",
+    "check-electron-pin": "node -e \"const v=require('electron/package.json').version;const y=require('node:fs').readFileSync('electron-builder.yml','utf8');if(!y.includes('electronVersion: '+v))throw new Error('electron-builder.yml electronVersion drifted from installed electron '+v)\""
+  },
+  "devDependencies": {
+    "@nudge/client": "0.1.0",
+    "@nudge/shared": "0.1.0",
+    "electron": "43.4.0",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.21.5"
+  }
+}

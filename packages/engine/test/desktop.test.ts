@@ -107,6 +107,35 @@ describe('notifyCommand', () => {
     expect(title.endIdx).toBe(script.length - 1)
   })
 
+  /**
+   * Round 2, Finding 3: `escAppleScript` (via `notifyCommand`'s darwin
+   * branch) was never exercised against a message containing a raw CR/LF —
+   * exactly the payload category focus.ts's HOSTILE constant added in round
+   * 1 for the OTHER escapers, but never ported here since packages/engine
+   * was out of that task's scope. Doubling backslash/quote alone does not
+   * make a line break safe: an AppleScript double-quoted literal cannot
+   * contain one, so it would abort the whole `display notification`
+   * statement mid-string — a silent no-op under fire-and-forget `osascript`
+   * (nothing here checks its exit code), not a crash.
+   */
+  it('breaks a CR/LF out of the AppleScript literal via `" & return & "` instead of leaving a raw line break inside it', () => {
+    const withBreaks = `${NASTY}\r\nStart-Process calc.exe #\\`
+    const c = notifyCommand('darwin', withBreaks, withBreaks)!
+    const script = c.args[1]
+
+    // The failure mode: a raw CR or LF surviving anywhere in the compiled
+    // script. Wherever one landed inside an still-open double-quoted
+    // literal, the AppleScript compiler would end the statement right
+    // there — everything after it either vanishes or (worse) runs as a
+    // second, unintended statement.
+    expect(script).not.toMatch(/[\r\n]/)
+
+    // The fix mechanism itself: each line break is expressed as breaking
+    // out of the literal, concatenating in the `return` constant, and
+    // reopening a fresh literal.
+    expect(script.split('" & return & "')).toHaveLength(3) // one break in body, one in title
+  })
+
   it('neutralises a quote/subexpression/semicolon payload on win32 (title and body) — PowerShell', () => {
     const c = notifyCommand('win32', NASTY, NASTY)!
     const script = c.args.join(' ')
@@ -215,5 +244,50 @@ describe('DesktopNotifier', () => {
     expect(() => new DesktopNotifier(DEFAULT_CONFIG, spawner, 'aix' as NodeJS.Platform)
       .alert(session(), 'blocked')).not.toThrow()
     expect(calls).toHaveLength(0)
+  })
+})
+
+/**
+ * Round 2, Finding 1: `alert()` used to be the ONLY way to reach either the
+ * banner or the sound, so `Engine#onLocal`'s round-1 fix (skip the whole
+ * call while a GUI is connected) silently took the sound — and the
+ * escalation ladder's repeat pings, since those are just more calls to the
+ * same `onLocal` — down with the banner it meant to suppress. `alertSound()`
+ * is the seam that lets the engine keep the sound (and repeats) alive while
+ * dropping only the banner. Proven here independently of Engine: each half
+ * can fire without the other.
+ */
+describe('DesktopNotifier: banner and sound are independently triggerable', () => {
+  const spy = () => {
+    const calls: Array<{ cmd: string; args: string[] }> = []
+    return { spawner: { run: (cmd: string, args: string[]) => calls.push({ cmd, args }) }, calls }
+  }
+
+  it('alertSound() plays the configured sound WITHOUT spawning a banner', () => {
+    const { spawner, calls } = spy()
+    new DesktopNotifier(DEFAULT_CONFIG, spawner, 'darwin').alertSound('blocked')
+    expect(calls).toHaveLength(1)
+    expect(calls[0].cmd).toBe('afplay')
+    expect(calls.some(c => c.cmd === 'osascript')).toBe(false)
+  })
+
+  it('alertSound() honours a per-tier sound: null — still no sound, and still no banner', () => {
+    const { spawner, calls } = spy()
+    new DesktopNotifier(DEFAULT_CONFIG, spawner, 'darwin').alertSound('idle-short') // DEFAULT_CONFIG: idle-short.sound === null
+    expect(calls).toHaveLength(0)
+  })
+
+  it('alertSound() honours a configured custom .wav path, same as alert() does', () => {
+    const cfg = mergeConfig({ tiers: { blocked: { sound: '/custom/ping.aiff' } } })
+    const { spawner, calls } = spy()
+    new DesktopNotifier(cfg as NudgeConfig, spawner, 'darwin').alertSound('blocked')
+    expect(calls).toEqual([{ cmd: 'afplay', args: ['/custom/ping.aiff'] }])
+  })
+
+  it('alert() still fires both banner and sound together — alertSound() is additive, not a replacement', () => {
+    const { spawner, calls } = spy()
+    new DesktopNotifier(DEFAULT_CONFIG, spawner, 'darwin').alert(session(), 'blocked')
+    expect(calls.some(c => c.cmd === 'osascript')).toBe(true)
+    expect(calls.some(c => c.cmd === 'afplay')).toBe(true)
   })
 })

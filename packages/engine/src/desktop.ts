@@ -24,9 +24,21 @@ const realSpawner: Spawner = {
   },
 }
 
-/** AppleScript string literal: backslash first, then double quote. */
+/**
+ * AppleScript string literal: backslash first, then double quote, then a
+ * raw CR/LF broken out of the literal via `" & return & "` (round 2,
+ * Finding 3). Doubling backslash/quote alone is not enough — an
+ * AppleScript double-quoted literal cannot contain a raw line break, so a
+ * `hook`-supplied `s.message` containing one (e.g. a multi-line command
+ * output) would otherwise abort compilation mid-string under this
+ * fire-and-forget `osascript` call: a silent no-op, not a crash, since
+ * nothing here observes the exit code. `" & return & "` closes the
+ * literal, concatenates in AppleScript's own newline constant, and reopens
+ * a fresh literal — valid wherever the original literal was, since `&` is
+ * ordinary string concatenation.
+ */
 function escAppleScript(s: string): string {
-  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r\n|\r|\n/g, '" & return & "')
 }
 
 /**
@@ -89,12 +101,30 @@ export class DesktopNotifier {
   ) {}
 
   alert(s: SessionState, tier: Tier): void {
+    this.#banner(s, tier)
+    this.alertSound(tier)
+  }
+
+  #banner(s: SessionState, tier: Tier): void {
     const title = `${s.project} needs you`
     const body = s.message || TIER_TEXT[tier]
-
     const n = notifyCommand(this.platform, title, body)
     if (n) this.spawner.run(n.cmd, n.args)
+  }
 
+  /**
+   * Round 2, Finding 1: split out of `alert()` so `Engine#onLocal` can play
+   * just the configured per-tier sound (honouring an explicit `sound: null`
+   * — see `@nudge/shared/config`'s DEFAULT_CONFIG, e.g. `idle-short`) while a
+   * GUI client's own clickable banner is the one actually shown on screen.
+   * The tray's own `Notifier` (packages/tray/src/notify.ts) always builds
+   * with `silent: true` and has no `NudgeConfig` of its own, so it cannot
+   * reproduce this — this is the only call that can, and it is also what
+   * keeps the escalation ladder's repeat pings (escalation.ts's
+   * `localRepeat`) audible instead of going fully silent while a GUI is
+   * connected.
+   */
+  alertSound(tier: Tier): void {
     const configured = this.cfg.tiers[tier].sound
     if (!configured) return
     const file = configured.includes('/') || configured.includes('\\')

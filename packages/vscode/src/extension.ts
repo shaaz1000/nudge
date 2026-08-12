@@ -97,6 +97,18 @@ let active: Disposable[] = []
 export function activate(context: vscode.ExtensionContext, deps: ActivateDeps = {}): void {
   const surface = deps.surface ?? defaultExtensionSurface()
   const socketPathOverride = surface.getConfiguration('nudge').get('socketPath', '')
+  // Deliberately NOT `{ gui: true }` (review round 1, Finding 5 —
+  // USER-APPROVED, "think about whether it should" — this is that
+  // consideration, decided no): `gui: true` tells the engine to skip its own
+  // OS-level desktop notification and trust this client to show an
+  // equivalent one instead. This extension's `Toaster` (toast.ts) only shows
+  // an in-editor toast, visible only while THIS VS Code window is focused —
+  // exactly the situation the engine's banner exists to cover is "the user
+  // is not looking at this window right now." Declaring this a GUI client
+  // would silently remove the one thing that still reaches the user when VS
+  // Code is minimized, on another virtual desktop, or simply not focused.
+  // Only packages/tray (an OS-level notification, not an in-app one) sets
+  // `gui: true` — see main.ts's identical comment on its own EngineClient.
   const client: EngineClientLike = deps.client ?? new EngineClient(clientOptionsFromConfig(socketPathOverride))
   const statusBar = new StatusBar()
   const toaster = new Toaster((msg: ClientMessage) => client.send(msg))

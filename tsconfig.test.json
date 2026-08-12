@@ -1,0 +1,33 @@
+{
+  // Type-checks the TEST files, which nothing else in this repo does.
+  //
+  // Every package tsconfig is `"include": ["src/**/*.ts"]`, and vitest
+  // transpiles without type-checking — so `tsc --build` checked exactly zero
+  // test files. Two consequences bit this project directly:
+  //
+  //   1. `@ts-expect-error` guards in the tests were INERT. focus.test.ts's
+  //      guard on "focusing must never resolve the wait" was the sole
+  //      enforcement of a rule the module calls Critical, and nothing ever
+  //      evaluated it.
+  //   2. Adding a method to an interface (TrayCallbacks) broke the test fakes
+  //      at RUNTIME rather than at compile time, which is how a wire-protocol
+  //      change can leave a green suite shipping a format no client speaks.
+  //
+  // `noEmit` + no project references: this is a checking pass, not a build.
+  // It deliberately does NOT use `composite`, so it never fights the real
+  // build graph or writes to any outDir.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "incremental": false,
+    "rootDir": ".",
+    "types": ["node", "electron"],
+    // The test files import their package's source directly (`../src/x.js`),
+    // so resolution follows the same paths the sources use.
+    "allowImportingTsExtensions": false
+  },
+  "include": ["packages/*/src/**/*.ts", "packages/*/test/**/*.ts"]
+}

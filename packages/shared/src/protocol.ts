@@ -3,7 +3,17 @@ import type { NudgeEvent, SessionState } from './types.js'
 export type ClientMessage =
   | { t: 'event'; event: NudgeEvent }
   | { t: 'list'; id: number }
-  | { t: 'subscribe'; id: number }
+  /**
+   * `gui`, review round 1 Finding 5 (USER-APPROVED): a GUI client (currently
+   * only the Electron tray — see packages/client/src/client.ts's
+   * `EngineClientOptions.gui` and packages/tray/src/main.ts's wiring)
+   * declares itself here so the engine can tell it apart from the CLI's
+   * short-lived request/response connections (which never subscribe at all)
+   * and from the VS Code extension (which subscribes but deliberately does
+   * NOT set `gui` — see extension.ts's comment for why). Optional and
+   * defaulting to falsy so every existing `subscribe` sender is unaffected.
+   */
+  | { t: 'subscribe'; id: number; gui?: boolean }
   | { t: 'snooze'; id: number; sessionId: string; ms: number }
   | { t: 'mute'; id: number; on: boolean }
   | { t: 'resolve'; id: number; sessionId: string }

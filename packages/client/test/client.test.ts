@@ -34,7 +34,7 @@ const session = (over: Partial<SessionState> = {}): SessionState => ({
  * connect, this stub option would go unused.
  */
 function stubEngine(opts: {
-  onSubscribe?: (s: Socket, id: number) => void
+  onSubscribe?: (s: Socket, id: number, gui: boolean | undefined) => void
   onList?: (s: Socket, id: number) => void
   listData?: SessionState[]
 } = {}) {
@@ -46,10 +46,10 @@ function stubEngine(opts: {
     s.setEncoding('utf8')
     s.on('data', chunk => {
       for (const raw of dec.push(chunk as unknown as string)) {
-        const m = raw as { t: string; id: number }
+        const m = raw as { t: string; id: number; gui?: boolean }
         if (m.t === 'subscribe') {
           s.write(encode({ t: 'ok', id: m.id }))
-          opts.onSubscribe?.(s, m.id)
+          opts.onSubscribe?.(s, m.id, m.gui)
         } else if (m.t === 'list') {
           s.write(encode({ t: 'ok', id: m.id, data: opts.listData ?? [] }))
           opts.onList?.(s, m.id)
@@ -72,7 +72,7 @@ function teardown(entry: { server: Server; sockets: Set<Socket> }): Promise<void
   return new Promise(resolve => entry.server.close(() => resolve()))
 }
 
-function makeClient(opts: { path?: string; initialBackoffMs?: number; maxBackoffMs?: number } = {}): EngineClient {
+function makeClient(opts: { path?: string; initialBackoffMs?: number; maxBackoffMs?: number; gui?: boolean } = {}): EngineClient {
   const c = new EngineClient({ path: sockPath, ...opts })
   clients.push(c)
   return c
@@ -114,6 +114,55 @@ describe('EngineClient', () => {
     await vi.waitFor(() => expect(states).toHaveLength(2))
     expect(states[1]).toHaveLength(1)
     expect(states[1][0].sessionId).toBe('s1')
+  })
+
+  // --- Review round 1, Finding 5 (USER-APPROVED) ---
+  // `gui` on EngineClientOptions is how a client (currently only the tray,
+  // see packages/tray/src/main.ts) declares itself a GUI so the engine can
+  // skip its own desktop notification in favour of this client's own
+  // clickable one (packages/engine/src/engine.ts's onLocal).
+  describe('gui option (Finding 5)', () => {
+    it('defaults to NOT declaring gui — every subscribe sender before this fix is unaffected', async () => {
+      let seenGui: boolean | undefined
+      let sawSubscribe = false
+      const engine = stubEngine({ onSubscribe: (_s, _id, gui) => { sawSubscribe = true; seenGui = gui } })
+      await listen(engine, sockPath)
+
+      const client = makeClient()
+      client.connect()
+
+      await vi.waitFor(() => expect(sawSubscribe).toBe(true))
+      expect(seenGui).toBeFalsy()
+    })
+
+    it('sends gui: true on subscribe when constructed with { gui: true }', async () => {
+      let seenGui: boolean | undefined
+      let sawSubscribe = false
+      const engine = stubEngine({ onSubscribe: (_s, _id, gui) => { sawSubscribe = true; seenGui = gui } })
+      await listen(engine, sockPath)
+
+      const client = makeClient({ gui: true })
+      client.connect()
+
+      await vi.waitFor(() => expect(sawSubscribe).toBe(true))
+      expect(seenGui).toBe(true)
+    })
+
+    it('re-sends gui: true on every reconnect, not just the first subscribe', async () => {
+      const engine1 = stubEngine()
+      await listen(engine1, sockPath)
+      const client = makeClient({ gui: true, initialBackoffMs: 15, maxBackoffMs: 60 })
+      client.connect()
+      await vi.waitFor(() => expect(client.connected).toBe(true))
+
+      await teardown(engine1)
+      await vi.waitFor(() => expect(client.connected).toBe(false), { timeout: 2000 })
+
+      let seenGui: boolean | undefined
+      const engine2 = stubEngine({ onSubscribe: (_s, _id, gui) => { seenGui = gui } })
+      await listen(engine2, sockPath)
+      await vi.waitFor(() => expect(seenGui).toBe(true), { timeout: 2000 })
+    })
   })
 
   // Finding I1 (CRITICAL): the engine only ever broadcasts on a *transition*

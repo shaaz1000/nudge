@@ -143,14 +143,66 @@ export class Engine {
    * first. A throw here (e.g. from a misbehaving DesktopNotifier) would
    * propagate uncaught out of that timer and crash the daemon, so it is
    * caught and logged rather than left to escape.
+   *
+   * Review round 1, Finding 5 (USER-APPROVED): with the Electron tray
+   * running, one waiting session used to produce TWO banners — this one
+   * (fired synchronously, before `server.broadcast()` even runs, so no
+   * tray-side change could ever preempt it) and the tray's own clickable
+   * `Notifier` (packages/tray/src/notify.ts). `gui` (read via
+   * `hasGuiClient()`, hoisted above the try/catch below — round 2, Finding
+   * 4 — so a throw there can't silently suppress the alert it's meant to
+   * gate) is re-checked on EVERY call (t=0 and every repeat), not cached
+   * from begin() — so if the tray quits or crashes mid-wait, the very next
+   * scheduled repeat (or `onGuiDisconnected`, immediately, see below) resumes
+   * a real desktop banner rather than leaving the user silently unalerted.
+   * Phone escalation (`onPhone`) and DB history are untouched.
+   *
+   * Round 2, Finding 1: the first fix here (round 1) called `return` before
+   * `notifier.alert()` whenever a GUI was connected — which suppressed not
+   * just the banner (redundant with the tray's own clickable one — the
+   * intent) but also the sound AND every escalation-ladder repeat
+   * (escalation.ts's `localRepeat`, 3 further pings at 60s by default),
+   * since `alert()` used to be the only entry point for either and the
+   * tray's own `Notifier` de-dups to one silent banner per wait. Net effect:
+   * a waiting session went from "4 audible banners over 3 minutes" to "one
+   * silent, auto-dismissing banner and nothing else." `DesktopNotifier` now
+   * splits banner and sound (see desktop.ts's `alertSound()`), so the gate
+   * below skips only the banner while a GUI is connected — the sound (which
+   * honours a per-tier `sound: null`, unlike the tray's own always-`silent:
+   * true` `Notifier`) still fires, on every repeat, restoring the ladder as
+   * an audible re-ping without reintroducing the double VISUAL banner.
    */
   onLocal(s: SessionState, tier: Tier): void {
+    let gui = false
+    try { gui = this.d.server.hasGuiClient() } catch { /* default false: keep local alerts flowing */ }
     try {
       const sup = localSuppression(this.d.cfg, s, tier, this.#frontmost, this.d.clock.now())
       if (sup !== 'none') return
+      if (gui) { this.d.notifier.alertSound(tier); return }
       this.d.notifier.alert(s, tier)
     } catch (err) {
       console.error(`nudge engine: onLocal failed for ${s.sessionId}`, err)
+    }
+  }
+
+  /**
+   * Finding 5: called by the server the instant the LAST connected GUI
+   * client disconnects (tray quit or crashed) — see
+   * `ServerHandlers.onGuiDisconnected`'s doc for why this can't just wait for
+   * the escalation ladder's next scheduled repeat. Every session still
+   * waiting was relying on the tray's own notification instead of this
+   * engine's; that safety net just vanished, so re-run the exact same
+   * `onLocal` check for each of them right now. `onLocal` re-checks
+   * `hasGuiClient()` itself (now false — this is called exactly when it
+   * transitions to false), so this reliably surfaces a real desktop
+   * notification for every currently-waiting session, subject only to the
+   * same suppression rules (DND, frontmost, mute) any other local alert
+   * already respects.
+   */
+  onGuiDisconnected(): void {
+    for (const s of this.d.store.list()) {
+      if (s.tier === null || s.waitingSince === null) continue
+      this.onLocal(s, s.tier)
     }
   }
 
