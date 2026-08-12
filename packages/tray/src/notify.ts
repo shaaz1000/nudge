@@ -1,5 +1,7 @@
 import { Notification } from 'electron'
 import type { SessionState, Tier } from '@nudge/shared/types'
+import { loadConfig as loadNudgeConfig, type NudgeConfig } from '@nudge/shared/config'
+import { isWaiting } from './suppression.js'
 
 /**
  * Mirrors packages/engine/src/desktop.ts's TIER_TEXT (also duplicated,
@@ -143,30 +145,63 @@ function defaultSurface(): NotifySurface {
  * (default 3, every `localRepeatIntervalMs` = 60s), so a long wait still
  * gets audible re-pings even though this banner itself does not repeat.
  */
+export interface NotifierDeps {
+  /** Re-read per update so `nudge mute` takes effect on the next broadcast, not the next restart. */
+  loadConfig?: () => NudgeConfig
+  now?: () => number
+}
+
 export class Notifier {
   readonly #onFocus: (s: SessionState) => void
   readonly #surface: NotifySurface
+  readonly #loadConfig: () => NudgeConfig
+  readonly #now: () => number
   readonly #shown = new Map<string, NotificationLike>()
+  #lastGoodConfig: NudgeConfig | null = null
   #disposed = false
 
-  constructor(onFocus: (s: SessionState) => void, surface: NotifySurface = defaultSurface()) {
+  constructor(
+    onFocus: (s: SessionState) => void,
+    surface: NotifySurface = defaultSurface(),
+    deps: NotifierDeps = {},
+  ) {
     this.#onFocus = onFocus
     this.#surface = surface
+    this.#loadConfig = deps.loadConfig ?? (() => loadNudgeConfig())
+    this.#now = deps.now ?? Date.now
   }
 
   update(mine: SessionState[]): void {
     if (this.#disposed) return
 
-    // Identical rule to Toaster#update and NudgeTray#render: a snoozed
-    // session is still `tier !== null` server-side (snooze is a separate
-    // suppression overlay, not a tier clear — see
-    // packages/engine/src/suppression.ts), so it must count as not-waiting
-    // for BOTH the clearing loop below AND notify-eligibility, or it would
-    // immediately drop its #shown tracking and re-notify in this same call.
-    const now = Date.now()
-    const isWaiting = (s: SessionState): boolean =>
-      s.tier !== null && (s.snoozedUntil === null || now >= s.snoozedUntil)
-    const waitingIds = new Set(mine.filter(isWaiting).map(s => s.sessionId))
+    // FULL suppression, not just snooze — see suppression.ts for why this is
+    // load-bearing rather than tidiness. This used to check only tier and
+    // snooze, which was survivable while the engine also raised its own
+    // banner. It no longer does: the tray declares `gui: true`, so the engine
+    // stands its banner down and this becomes the ONLY banner source.
+    // Ignoring `muted` here meant `nudge mute` silenced the engine and the
+    // tray notified anyway — the user muted Nudge and Nudge kept notifying,
+    // with no escape short of quitting the tray. Same for a tier switched off
+    // entirely.
+    //
+    // Applied through ONE predicate used by both the clearing loop and
+    // notify-eligibility: a session that becomes muted or snoozed mid-wait
+    // has its banner closed rather than left on screen, and the two can never
+    // disagree about what counts as waiting.
+    const now = this.#now()
+    let cfg: NudgeConfig
+    try {
+      cfg = this.#loadConfig()
+      this.#lastGoodConfig = cfg
+    } catch (err) {
+      // Same fail-soft shape as AttentionManager: a broken config must not
+      // strand banners on screen with no way to clear them.
+      console.error(`nudge tray: notifier using last-known-good config: ${(err as Error).message}`)
+      if (this.#lastGoodConfig === null) return
+      cfg = this.#lastGoodConfig
+    }
+    const waiting = (s: SessionState): boolean => isWaiting(cfg, s, now)
+    const waitingIds = new Set(mine.filter(waiting).map(s => s.sessionId))
 
     // Clear-on-resolve: close the OS notification (if still on screen) and
     // drop tracking for any session this update no longer reports as
@@ -181,7 +216,7 @@ export class Notifier {
     }
 
     for (const s of mine) {
-      if (!isWaiting(s)) continue
+      if (!waiting(s)) continue
       if (this.#shown.has(s.sessionId)) continue
       this.#shown.set(s.sessionId, this.#show(s))
     }

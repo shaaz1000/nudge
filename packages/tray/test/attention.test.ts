@@ -67,9 +67,43 @@ const cfg = (over: Partial<NudgeConfig> = {}): NudgeConfig => ({
   ...over,
 })
 
-/** A fully controllable fake DockSurface — records every call, returns increasing ids. */
+/**
+ * Let a pending `dock.show()` settle so the bounce queued behind it runs.
+ *
+ * Required because the real `app.dock.show()` is async and production always
+ * takes `#start()`'s async branch. Tests that assert on `bounce`/`cancelBounce`
+ * without this were previously green only because the fake `show()` was
+ * synchronous — i.e. they were exercising a branch macOS never runs.
+ */
+const flush = async (): Promise<void> => {
+  for (let i = 0; i < 4; i++) await Promise.resolve()
+}
+
+/** update() + let the async show/bounce settle, the way a real broadcast does. */
+async function drive(
+  attn: AttentionManager,
+  sessions: SessionState[],
+  frontmost: string | null = null,
+): Promise<void> {
+  attn.update(sessions, frontmost)
+  await flush()
+}
+
+/**
+ * A fully controllable fake DockSurface — records every call, returns
+ * increasing ids.
+ *
+ * `show` is **async**, because the real `app.dock.show()` is: it returns a
+ * Promise that resolves once the icon is actually in the Dock, so production
+ * ALWAYS takes `#start()`'s async branch. An earlier version of this fake
+ * returned `undefined`, which sent every test down the synchronous branch —
+ * a branch no real macOS run ever executes — and two tests consequently
+ * asserted guarantees that were false in production. That is the same
+ * fake-diverges-from-the-real-API defect that produced the bounce-id-0 bug;
+ * keep this faithful to the real contract.
+ */
 function makeDockSurface() {
-  const show = vi.fn()
+  const show = vi.fn(async () => {})
   const hide = vi.fn()
   let nextId = 1
   const bounceTypes: Array<'critical' | 'informational'> = []
@@ -289,6 +323,32 @@ describe('isSessionSuppressed: tier-disabled — the engine applies `enabled` at
     expect(isSessionSuppressed(c, session({ tier: 'blocked' }), 100, null)).toBe(false)
   })
 
+  /**
+   * Whole-branch review, Important 4. The evaluation catch used to `return`,
+   * which is the exact freeze the loadConfig catch above exists to prevent:
+   * throw while already bouncing → `#attracting` stays true → no `#stop()` is
+   * ever reached → the icon bounces until the user quits Nudge. A failed
+   * evaluation must fail toward SILENCE (a missed nudge) rather than toward
+   * an unstoppable one.
+   */
+  it('stops a bounce in progress when evaluation starts throwing, instead of freezing mid-bounce', async () => {
+    const { surface, cancelBounce, hide } = makeDockSurface()
+    let broken = false
+    const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, {
+      loadConfig: () => (broken
+        ? ({ ...cfg(), tiers: null } as unknown as NudgeConfig) // makes needsAttention throw
+        : cfg()),
+      now: () => 100,
+    })
+
+    await drive(attn, [session({ tier: 'blocked' })])
+    broken = true
+    await drive(attn, [session({ tier: 'blocked' })])
+
+    expect(cancelBounce).toHaveBeenCalledTimes(1)
+    expect(hide).toHaveBeenCalledTimes(1)
+  })
+
   it('a throw while evaluating attention never escapes update() into the broadcast handler', () => {
     const { surface } = makeDockSurface()
     const exploding = { get muted(): boolean { throw new Error('config exploded') } } as unknown as NudgeConfig
@@ -329,35 +389,35 @@ describe('needsAttention: pure aggregate — at least one eligible, unsuppressed
 })
 
 describe('AttentionManager: macOS Dock bounce on entering a waiting state (Step 1)', () => {
-  it('shows the Dock, then bounces critical — not informational', () => {
+  it('shows the Dock, then bounces critical — not informational', async () => {
     const { surface, show, bounce, bounceTypes } = makeDockSurface()
     const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
 
-    attn.update([session({ tier: 'blocked' })])
+    await drive(attn, [session({ tier: 'blocked' })])
 
     expect(show).toHaveBeenCalledTimes(1)
     expect(bounce).toHaveBeenCalledTimes(1)
     expect(bounceTypes).toEqual(['critical'])
   })
 
-  it('does not re-bounce on a second broadcast of the same still-waiting session', () => {
+  it('does not re-bounce on a second broadcast of the same still-waiting session', async () => {
     const { surface, bounce } = makeDockSurface()
     const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
 
-    attn.update([session({ tier: 'blocked' })])
-    attn.update([session({ tier: 'blocked' })])
-    attn.update([session({ tier: 'blocked' })])
+    await drive(attn, [session({ tier: 'blocked' })])
+    await drive(attn, [session({ tier: 'blocked' })])
+    await drive(attn, [session({ tier: 'blocked' })])
 
     expect(bounce).toHaveBeenCalledTimes(1)
   })
 
-  it('bounces again for a fresh wait after a previous one resolved', () => {
+  it('bounces again for a fresh wait after a previous one resolved', async () => {
     const { surface, bounce } = makeDockSurface()
     const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
 
-    attn.update([session({ tier: 'blocked' })])
-    attn.update([])
-    attn.update([session({ tier: 'blocked' })])
+    await drive(attn, [session({ tier: 'blocked' })])
+    await drive(attn, [])
+    await drive(attn, [session({ tier: 'blocked' })])
 
     expect(bounce).toHaveBeenCalledTimes(2)
   })
@@ -367,26 +427,26 @@ describe('AttentionManager: cancel on resolve — load-bearing (Step 2)', () => 
   // See the task report for the deliberate-break command + RED output that
   // proves this test actually exercises cancelBounce: commenting out the
   // `cancelBounce` call in attention.ts's #stop() must make this go red.
-  it('cancels the EXACT bounce id returned by bounce(), and hides the Dock, the instant the wait clears', () => {
+  it('cancels the EXACT bounce id returned by bounce(), and hides the Dock, the instant the wait clears', async () => {
     const { surface, bounce, cancelBounce, hide } = makeDockSurface()
     const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
 
-    attn.update([session({ tier: 'blocked' })])
+    await drive(attn, [session({ tier: 'blocked' })])
     const returnedId = bounce.mock.results[0]?.value as number
 
-    attn.update([])
+    await drive(attn, [])
 
     expect(cancelBounce).toHaveBeenCalledTimes(1)
     expect(cancelBounce).toHaveBeenCalledWith(returnedId)
     expect(hide).toHaveBeenCalledTimes(1)
   })
 
-  it('also cancels and hides when the session transitions to tier: null (resolved), not only when it drops out of the list', () => {
+  it('also cancels and hides when the session transitions to tier: null (resolved), not only when it drops out of the list', async () => {
     const { surface, cancelBounce, hide } = makeDockSurface()
     const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
 
-    attn.update([session({ tier: 'blocked' })])
-    attn.update([session({ tier: null, status: 'running', waitingSince: null })])
+    await drive(attn, [session({ tier: 'blocked' })])
+    await drive(attn, [session({ tier: null, status: 'running', waitingSince: null })])
 
     expect(cancelBounce).toHaveBeenCalledTimes(1)
     expect(hide).toHaveBeenCalledTimes(1)
@@ -401,7 +461,7 @@ describe('AttentionManager: cancel on resolve — load-bearing (Step 2)', () => 
    * the very first bounce in production — the exact forever-bouncing icon
    * this whole task exists to prevent.
    */
-  it('cancels a bounce id of 0 — the id real Electron returns first, which a truthiness guard would skip', () => {
+  it('cancels a bounce id of 0 — the id real Electron returns first, which a truthiness guard would skip', async () => {
     const zeroDock = {
       show: vi.fn(), hide: vi.fn(),
       bounce: vi.fn(() => 0),
@@ -410,8 +470,8 @@ describe('AttentionManager: cancel on resolve — load-bearing (Step 2)', () => 
     const surface: AttentionSurface = { platform: 'darwin', dock: zeroDock, flashWindow: null }
     const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
 
-    attn.update([session({ tier: 'blocked' })])
-    attn.update([])
+    await drive(attn, [session({ tier: 'blocked' })])
+    await drive(attn, [])
 
     expect(zeroDock.cancelBounce).toHaveBeenCalledWith(0)
   })
@@ -427,11 +487,11 @@ describe('AttentionManager: cancel on resolve — load-bearing (Step 2)', () => 
     expect(hide).not.toHaveBeenCalled()
   })
 
-  it('cancels and hides only once no session needs attention any more, after the last one clears', () => {
+  it('cancels and hides only once no session needs attention any more, after the last one clears', async () => {
     const { surface, cancelBounce, hide } = makeDockSurface()
     const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
 
-    attn.update([session({ sessionId: 's1', tier: 'blocked' }), session({ sessionId: 's2', tier: 'blocked' })])
+    await drive(attn, [session({ sessionId: 's1', tier: 'blocked' }), session({ sessionId: 's2', tier: 'blocked' })])
     attn.update([session({ sessionId: 's2', tier: 'blocked' })]) // s1 resolved, s2 still waiting
     attn.update([]) // s2 resolved too
 
@@ -459,7 +519,7 @@ describe('AttentionManager: the real dock.show() is async (found live, not by te
     const { surface, dock, release } = deferredDock()
     const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
 
-    attn.update([session({ tier: 'blocked' })])
+    await drive(attn, [session({ tier: 'blocked' })])
     expect(dock.show).toHaveBeenCalledTimes(1)
     expect(dock.bounce).not.toHaveBeenCalled() // still in flight
 
@@ -480,7 +540,7 @@ describe('AttentionManager: the real dock.show() is async (found live, not by te
     const { surface, dock, release } = deferredDock()
     const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
 
-    attn.update([session({ tier: 'blocked' })])
+    await drive(attn, [session({ tier: 'blocked' })])
     attn.update([]) // answered while the Dock was still appearing
     release()
     await Promise.resolve(); await Promise.resolve()
@@ -488,11 +548,40 @@ describe('AttentionManager: the real dock.show() is async (found live, not by te
     expect(dock.bounce).not.toHaveBeenCalled()
   })
 
-  it('abandons the bounce when disposed before show() settles', async () => {
+  /**
+   * Whole-branch review, Important 5. `#stop()` cannot hide an icon that does
+   * not exist yet: if the wait resolves while `show()` is still in flight, the
+   * hide is issued against nothing, the icon then lands in the Dock, and
+   * because `#attracting` is already false no future `#stop()` will ever hide
+   * it — a permanent icon for a wait that already ended. Answering a prompt a
+   * second or two after it appears is the product's single most common
+   * interaction, so this is the normal case rather than an exotic one.
+   */
+  it('hides the Dock once a show() that landed AFTER the wait ended finally settles', async () => {
     const { surface, dock, release } = deferredDock()
     const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
 
     attn.update([session({ tier: 'blocked' })])
+    attn.update([])           // answered while the Dock was still appearing
+    const hidesBeforeIconExists = (dock.hide as ReturnType<typeof vi.fn>).mock.calls.length
+    release()                 // ...and only now does the icon actually exist
+    await flush()
+
+    expect(dock.bounce).not.toHaveBeenCalled()
+    // Counting, not `toHaveBeenCalled()`: `#stop()` already issued a hide
+    // synchronously — against an icon that did not exist yet, which is the
+    // whole bug — so a bare "was hide called?" passes even with the deferred
+    // hide deleted. What must be true is that ANOTHER hide lands after the
+    // show settles.
+    expect((dock.hide as ReturnType<typeof vi.fn>).mock.calls.length)
+      .toBeGreaterThan(hidesBeforeIconExists)
+  })
+
+  it('abandons the bounce when disposed before show() settles', async () => {
+    const { surface, dock, release } = deferredDock()
+    const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
+
+    await drive(attn, [session({ tier: 'blocked' })])
     attn.dispose()
     release()
     await Promise.resolve(); await Promise.resolve()
@@ -508,7 +597,7 @@ describe('AttentionManager: the real dock.show() is async (found live, not by te
     const surface: AttentionSurface = { platform: 'darwin', dock, flashWindow: null }
     const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
 
-    attn.update([session({ tier: 'blocked' })])
+    await drive(attn, [session({ tier: 'blocked' })])
     await Promise.resolve(); await Promise.resolve(); await Promise.resolve()
 
     expect(dock.bounce).toHaveBeenCalledWith('critical')
@@ -518,10 +607,10 @@ describe('AttentionManager: the real dock.show() is async (found live, not by te
     const { surface, dock, release } = deferredDock()
     const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
 
-    attn.update([session({ tier: 'blocked' })])
+    await drive(attn, [session({ tier: 'blocked' })])
     release()
     await Promise.resolve(); await Promise.resolve()
-    attn.update([])
+    await drive(attn, [])
 
     expect(dock.cancelBounce).toHaveBeenCalledWith(0)
   })
@@ -538,12 +627,12 @@ describe('AttentionManager: suppression — same rules as every other local aler
     expect(bounce).not.toHaveBeenCalled()
   })
 
-  it('a per-project-muted session does not bounce, but an unrelated project\'s session still does', () => {
+  it('a per-project-muted session does not bounce, but an unrelated project\'s session still does', async () => {
     const { surface, bounce } = makeDockSurface()
     const c = cfg({ projects: { '/a/muted-repo': { muted: true } } })
     const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: () => c, now: () => 100 })
 
-    attn.update([
+    await drive(attn, [
       session({ sessionId: 's1', cwd: '/a/muted-repo', tier: 'blocked' }),
       session({ sessionId: 's2', cwd: '/a/other-repo', tier: 'blocked' }),
     ])
@@ -560,26 +649,26 @@ describe('AttentionManager: suppression — same rules as every other local aler
     expect(bounce).not.toHaveBeenCalled()
   })
 
-  it('bounces once the same session stops being reported as frontmost while still waiting', () => {
+  it('bounces once the same session stops being reported as frontmost while still waiting', async () => {
     const { surface, bounce } = makeDockSurface()
     const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
 
-    attn.update([session({ sessionId: 's1', tier: 'blocked' })], 's1')
-    attn.update([session({ sessionId: 's1', tier: 'blocked' })], null)
+    await drive(attn, [session({ sessionId: 's1', tier: 'blocked' })], 's1')
+    await drive(attn, [session({ sessionId: 's1', tier: 'blocked' })], null)
 
     expect(bounce).toHaveBeenCalledTimes(1)
   })
 
-  it('a snoozed session does not bounce until the snooze expires', () => {
+  it('a snoozed session does not bounce until the snooze expires', async () => {
     const { surface, bounce } = makeDockSurface()
     let now = 100
     const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => now })
 
-    attn.update([session({ tier: 'blocked', snoozedUntil: 1_000 })])
+    await drive(attn, [session({ tier: 'blocked', snoozedUntil: 1_000 })])
     expect(bounce).not.toHaveBeenCalled()
 
     now = 1_001
-    attn.update([session({ tier: 'blocked', snoozedUntil: 1_000 })])
+    await drive(attn, [session({ tier: 'blocked', snoozedUntil: 1_000 })])
     expect(bounce).toHaveBeenCalledTimes(1)
   })
 })
@@ -594,11 +683,11 @@ describe('AttentionManager: tier filter — configurable (Step 6)', () => {
     expect(bounce).not.toHaveBeenCalled()
   })
 
-  it('bounces for blocked under the default config', () => {
+  it('bounces for blocked under the default config', async () => {
     const { surface, bounce } = makeDockSurface()
     const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
 
-    attn.update([session({ tier: 'blocked' })])
+    await drive(attn, [session({ tier: 'blocked' })])
 
     expect(bounce).toHaveBeenCalledTimes(1)
   })
@@ -613,15 +702,15 @@ describe('AttentionManager: tier filter — configurable (Step 6)', () => {
     expect(bounce).not.toHaveBeenCalled()
   })
 
-  it('a custom tier filter can enable stalled and disable blocked', () => {
+  it('a custom tier filter can enable stalled and disable blocked', async () => {
     const { surface, bounce } = makeDockSurface()
     const custom: AttentionConfig = { bounceOnBlocked: true, bounceTiers: new Set(['stalled']) }
     const attn = new AttentionManager(surface, custom, { loadConfig: cfg, now: () => 100 })
 
-    attn.update([session({ sessionId: 's1', tier: 'blocked' })])
+    await drive(attn, [session({ sessionId: 's1', tier: 'blocked' })])
     expect(bounce).not.toHaveBeenCalled()
 
-    attn.update([session({ sessionId: 's2', tier: 'stalled' })])
+    await drive(attn, [session({ sessionId: 's2', tier: 'stalled' })])
     expect(bounce).toHaveBeenCalledTimes(1)
   })
 })
@@ -662,7 +751,7 @@ describe('AttentionManager: a broken config must never strand a bouncing icon', 
   // true — so the icon kept bouncing forever once the user had answered. The
   // whole point of Step 2 reached through the error path instead of the
   // happy path.
-  it('still cancels the bounce when the config goes unreadable mid-wait', () => {
+  it('still cancels the bounce when the config goes unreadable mid-wait', async () => {
     const { surface, cancelBounce, hide } = makeDockSurface()
     let broken = false
     const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, {
@@ -670,7 +759,7 @@ describe('AttentionManager: a broken config must never strand a bouncing icon', 
       now: () => 100,
     })
 
-    attn.update([session({ tier: 'blocked' })])
+    await drive(attn, [session({ tier: 'blocked' })])
     broken = true
     attn.update([]) // the wait resolved, but the config can no longer be read
 
@@ -692,9 +781,12 @@ describe('AttentionManager: a broken config must never strand a bouncing icon', 
 })
 
 describe('AttentionManager: a throwing surface must not wedge the manager', () => {
-  it('does not claim to be bouncing when bounce() throws — a later resolve has nothing to cancel', () => {
+  it('does not claim to be bouncing when bounce() throws — a later resolve has nothing to cancel', async () => {
+    // async show(): the branch production actually runs. With a sync show()
+    // this test exercised a branch macOS never takes, and passed while the
+    // real async path left the icon stranded in the Dock.
     const dock: DockSurface = {
-      show: vi.fn(), hide: vi.fn(),
+      show: vi.fn(async () => {}), hide: vi.fn(),
       bounce: vi.fn(() => { throw new Error('dock is gone') }),
       cancelBounce: vi.fn(),
     }
@@ -702,14 +794,14 @@ describe('AttentionManager: a throwing surface must not wedge the manager', () =
     const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
 
     expect(() => attn.update([session({ tier: 'blocked' })])).not.toThrow()
-    attn.update([])
+    await drive(attn, [])
 
     // Never started, so nothing to stop: a cancelBounce here would be against
     // a bounce id that was never returned.
     expect(dock.cancelBounce).not.toHaveBeenCalled()
   })
 
-  it('hides a Dock it showed when bounce() then throws, rather than stranding the icon', () => {
+  it('hides a Dock it showed when bounce() then throws, rather than stranding the icon', async () => {
     const dock: DockSurface = {
       show: vi.fn(), hide: vi.fn(),
       bounce: vi.fn(() => { throw new Error('dock is gone') }),
@@ -718,25 +810,25 @@ describe('AttentionManager: a throwing surface must not wedge the manager', () =
     const surface: AttentionSurface = { platform: 'darwin', dock, flashWindow: null }
     const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
 
-    attn.update([session({ tier: 'blocked' })])
+    await drive(attn, [session({ tier: 'blocked' })])
 
     // #attracting stayed false, so no later #stop() would ever hide it.
     expect(dock.hide).toHaveBeenCalledTimes(1)
   })
 
-  it('retries on the next update after a failed start rather than giving up for good', () => {
+  it('retries on the next update after a failed start rather than giving up for good', async () => {
     let fail = true
     const dock: DockSurface = {
-      show: vi.fn(), hide: vi.fn(),
+      show: vi.fn(async () => {}), hide: vi.fn(),
       bounce: vi.fn(() => { if (fail) throw new Error('transient'); return 7 }),
       cancelBounce: vi.fn(),
     }
     const surface: AttentionSurface = { platform: 'darwin', dock, flashWindow: null }
     const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
 
-    attn.update([session({ tier: 'blocked' })])
+    await drive(attn, [session({ tier: 'blocked' })])
     fail = false
-    attn.update([session({ tier: 'blocked' })])
+    await drive(attn, [session({ tier: 'blocked' })])
 
     expect(dock.bounce).toHaveBeenCalledTimes(2)
   })
@@ -917,11 +1009,11 @@ describe('defaultSurface: the hidden-Dock baseline (review finding 3)', () => {
 })
 
 describe('AttentionManager: dispose', () => {
-  it('dispose() while bouncing cancels the bounce and hides the Dock — a quit mid-wait must not leave it hanging', () => {
+  it('dispose() while bouncing cancels the bounce and hides the Dock — a quit mid-wait must not leave it hanging', async () => {
     const { surface, cancelBounce, hide } = makeDockSurface()
     const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
 
-    attn.update([session({ tier: 'blocked' })])
+    await drive(attn, [session({ tier: 'blocked' })])
     attn.dispose()
 
     expect(cancelBounce).toHaveBeenCalledTimes(1)
@@ -951,11 +1043,11 @@ describe('AttentionManager: dispose', () => {
     expect(bounce).not.toHaveBeenCalled()
   })
 
-  it('is safe to dispose twice and does not double-cancel/hide', () => {
+  it('is safe to dispose twice and does not double-cancel/hide', async () => {
     const { surface, cancelBounce, hide } = makeDockSurface()
     const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
 
-    attn.update([session({ tier: 'blocked' })])
+    await drive(attn, [session({ tier: 'blocked' })])
     attn.dispose()
     attn.dispose()
 

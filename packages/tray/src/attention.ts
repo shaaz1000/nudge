@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import type { SessionState, Tier } from '@nudge/shared/types'
 import { DEFAULT_CONFIG, loadConfig as loadNudgeConfig, type NudgeConfig } from '@nudge/shared/config'
 import { configPath } from '@nudge/shared/paths'
+import { isSessionSuppressed } from './suppression.js'
 
 const TIERS = Object.keys(DEFAULT_CONFIG.tiers) as Tier[]
 
@@ -141,39 +142,16 @@ export function isTierEligible(cfg: AttentionConfig, tier: Tier): boolean {
 }
 
 /**
- * Mirrors packages/engine/src/suppression.ts's `localSuppression`, in the same
- * priority order: tier-disabled -> frontmost -> muted -> project-muted ->
- * snoozed.
+ * Re-exported so existing importers keep working; the rule itself now lives
+ * in suppression.ts, shared with notify.ts. It was previously implemented
+ * twice in this package with *different* rules, and the difference was a real
+ * bug — see suppression.ts.
  *
- * Duplicated rather than imported for the same reason notify.ts duplicates
- * TIER_TEXT: `packages/engine` is out of this task's scope, and the tray
- * cannot import from it. The engine remains the authority — if these rules
- * ever diverge, the engine's are correct and this must be corrected to match.
- *
- * The `enabled` check is NOT redundant with `isTierEligible`: that one keys
- * off `bounceTiers` (which tiers deserve a *persistent* signal), whereas
- * `tiers[t].enabled` is the user switching a tier off entirely. The engine
- * applies `enabled` at alert time, not when assigning `tier`, so a broadcast
- * still carries `tier: 'blocked'` for a disabled tier — without this check a
- * disabled tier would go silent everywhere except the Dock.
+ * The `enabled` check inside it is NOT redundant with `isTierEligible`: that
+ * one keys off `bounceTiers` (which tiers deserve a *persistent* signal),
+ * whereas `tiers[t].enabled` is the user switching a tier off entirely.
  */
-export function isSessionSuppressed(
-  cfg: NudgeConfig,
-  s: SessionState,
-  now: number,
-  frontmostSessionId: string | null,
-): boolean {
-  // `?.` and an explicit `=== false`: a config missing this tier entirely
-  // must not read as "disabled" (which `!undefined` would give), because that
-  // silently suppresses a real nudge. Only an explicit `enabled: false`
-  // suppresses.
-  if (s.tier !== null && cfg.tiers[s.tier]?.enabled === false) return true
-  if (frontmostSessionId !== null && frontmostSessionId === s.sessionId) return true
-  if (cfg.muted) return true
-  if (cfg.projects[s.cwd]?.muted) return true
-  if (s.snoozedUntil !== null && now < s.snoozedUntil) return true
-  return false
-}
+export { isSessionSuppressed } from './suppression.js'
 
 /** True when at least one session is both tier-eligible and unsuppressed. */
 export function needsAttention(
@@ -345,6 +323,8 @@ export class AttentionManager {
   readonly #now: () => number
   #lastGoodConfig: NudgeConfig | null = null
   #gen = 0
+  /** An in-flight `dock.show()`, so `#stop()` can defer its `hide()` until the icon actually exists. */
+  #showing: Promise<void> | null = null
   #bounceId: number | null = null
   #attracting = false
   #disposed = false
@@ -397,7 +377,13 @@ export class AttentionManager {
       wanted = needsAttention(sessions, this.#config, cfg, this.#now(), frontmostSessionId)
     } catch (err) {
       console.error(`nudge tray: attention evaluation failed: ${(err as Error).message}`)
-      return
+      // Fail toward SILENCE, not toward an early return. Returning here would
+      // repeat the exact bug the loadConfig catch above exists to avoid: if
+      // this throws while already bouncing, `#attracting` stays true, no
+      // `#stop()` is ever reached, and the icon bounces until the user quits
+      // Nudge. Treating a failed evaluation as "nothing needs attention"
+      // means the worst case is a missed nudge rather than an unstoppable one.
+      wanted = false
     }
 
     if (wanted && !this.#attracting) this.#start()
@@ -418,11 +404,27 @@ export class AttentionManager {
           // The real Dock resolves this once the icon exists. Bouncing before
           // that is a race against an icon that may not be there yet.
           this.#attracting = true
+          this.#showing = showing
           void showing
             .catch((err: Error) => {
               console.error(`nudge tray: could not show the Dock icon: ${err.message}`)
             })
-            .then(() => { this.#bounceOnce(gen, dock) })
+            .then(() => {
+              if (this.#showing === showing) this.#showing = null
+              // A `#stop()` that ran while this was in flight could not hide
+              // an icon that did not exist yet, so it deferred the hide to
+              // here. Without this the icon lands in the Dock AFTER the wait
+              // ended and stays there forever: `#attracting` is already false,
+              // so no future `#stop()` will ever hide it. Answering a prompt
+              // within a second or two of it appearing is the single most
+              // common interaction this product has, so this race is the
+              // normal case, not an exotic one.
+              if (gen !== this.#gen) {
+                try { dock.hide() } catch { /* nothing further to try */ }
+                return
+              }
+              this.#bounceOnce(gen, dock)
+            })
           return
         }
         // 'critical' bounces until the app is activated; 'informational' is a
@@ -462,6 +464,15 @@ export class AttentionManager {
       this.#bounceId = dock.bounce('critical')
     } catch (err) {
       console.error(`nudge tray: could not raise persistent attention: ${(err as Error).message}`)
+      // Must mirror the synchronous branch's failure handling exactly.
+      // `#attracting` was set optimistically before awaiting `show()` so a
+      // resolve arriving mid-flight could still cancel — but if the bounce
+      // itself failed there is nothing bouncing, and leaving the flag set
+      // would (a) strand a shown-but-motionless Dock icon for the whole
+      // wait, because no `#stop()` would ever hide it, and (b) block every
+      // retry, since `wanted && !this.#attracting` can never be true again.
+      this.#attracting = false
+      try { dock.hide() } catch { /* nothing further to try */ }
     }
   }
 

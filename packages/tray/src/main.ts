@@ -92,11 +92,34 @@ function defaultAppSurface(): AppSurface {
     whenReady: () => app.whenReady(),
     onSecondInstance: cb => { app.on('second-instance', () => cb()) },
     onBeforeQuit: cb => { app.on('before-quit', () => cb()) },
-    getLoginItemEnabled: () => app.getLoginItemSettings().openAtLogin,
+    // `getLoginItemSettings`/`setLoginItemSettings` are macOS+Windows ONLY —
+    // Electron does not define them on Linux. They are called from the tray
+    // menu, which is rebuilt on EVERY render, so an unguarded call threw a
+    // TypeError out of the render, out of the un-caught `whenReady` callback,
+    // and took the whole app down before `client.connect()` ever ran: a
+    // permanently idle tray icon with no menu, no engine connection, and
+    // nothing registered for disposal. Silent, on the platform least likely
+    // to be tested.
+    getLoginItemEnabled: () => {
+      if (!supportsLoginItems()) return false
+      try {
+        return app.getLoginItemSettings().openAtLogin
+      } catch (err) {
+        console.error(`nudge tray: could not read login-item settings: ${(err as Error).message}`)
+        return false
+      }
+    },
     // `openAsHidden` is macOS-only and ignored elsewhere; for a menu-bar app
     // there is nothing to show at login anyway, so starting hidden is right
     // on every platform that honours it.
-    setLoginItemEnabled: on => { app.setLoginItemSettings({ openAtLogin: on, openAsHidden: true }) },
+    setLoginItemEnabled: on => {
+      if (!supportsLoginItems()) return
+      try {
+        app.setLoginItemSettings({ openAtLogin: on, openAsHidden: true })
+      } catch (err) {
+        console.error(`nudge tray: could not set login-item settings: ${(err as Error).message}`)
+      }
+    },
   }
 }
 
@@ -119,6 +142,25 @@ function defaultSpawnEngine(): void {
   })
   p.on('error', e => console.error(`nudge tray: could not start the engine: ${e.message}`))
   p.unref()
+}
+
+/** Electron implements login items on macOS and Windows only; on Linux the methods do not exist. */
+function supportsLoginItems(): boolean {
+  return process.platform === 'darwin' || process.platform === 'win32'
+}
+
+/**
+ * Runs a broadcast consumer so one throwing consumer cannot silence the
+ * others. The three consumers are independent renderings of the same state,
+ * and the least important of them (persistent attention) must never be able
+ * to cost the user their tray icon or their notification.
+ */
+function guard(what: string, fn: () => void): void {
+  try {
+    fn()
+  } catch (err) {
+    console.error(`nudge tray: ${what} failed: ${(err as Error).message}`)
+  }
 }
 
 const CONNECTIVITY_POLL_MS = 5_000
@@ -289,13 +331,19 @@ export function main(deps: MainDeps = {}): void {
     let lastSessions: SessionState[] = []
     client.onState(sessions => {
       lastSessions = sessions
-      tray.render(sessions, client.connected)
-      notifier.update(sessions)
+      // Each consumer is isolated: the client swallows a throwing listener,
+      // so without this a single failing render would silently stop the
+      // notification AND the Dock bounce for that broadcast — and forever, if
+      // the failure is deterministic. AttentionManager already guards its own
+      // body for this reason; the ordering meant the other two could still
+      // break it.
+      guard('tray render', () => tray.render(sessions, client.connected))
+      guard('notification update', () => notifier.update(sessions))
       // Frontmost is deliberately not passed: the engine tracks it privately
       // (engine.ts's `#frontmost`) and does not include it in its state
       // broadcast, so no client can observe it. AttentionManager implements
       // and tests the rule regardless — see its `update` doc.
-      attention.update(sessions)
+      guard('attention update', () => attention.update(sessions))
       const waiting = sessions.filter(s => s.tier !== null).length
       console.error(`nudge tray: state — ${waiting} waiting, connected=${client.connected}`)
     })
@@ -307,7 +355,10 @@ export function main(deps: MainDeps = {}): void {
     // (extension.ts's CONNECTIVITY_POLL_MS) for the exact same gap.
     let lastConnected = client.connected
     const pollTimer = setInterval(() => {
-      tray.render(lastSessions, client.connected)
+      // Guarded: an unprotected throw in a bare timer callback is an uncaught
+      // exception on the Electron main thread — an error dialog or a dead
+      // app, every 5 seconds, forever.
+      guard('tray render (poll)', () => tray.render(lastSessions, client.connected))
       // Attention is driven from the poll too, not just from broadcasts. If
       // the engine dies mid-wait it will never broadcast the resolve, and a
       // Dock icon bouncing on state the tray can no longer trust cannot be
@@ -322,7 +373,14 @@ export function main(deps: MainDeps = {}): void {
       // every 5 seconds for anyone with a broken config.
       if (client.connected !== lastConnected) {
         lastConnected = client.connected
-        attention.update(client.connected ? lastSessions : [])
+        if (!client.connected) {
+          // Drop the pre-outage snapshot as well as clearing the alert.
+          // Keeping it meant a reconnect re-raised a bounce from stale data —
+          // for waits the user may well have answered while the engine was
+          // down. The engine sends a fresh snapshot on reconnect anyway.
+          lastSessions = []
+        }
+        guard('attention update (poll)', () => attention.update(lastSessions))
       }
     }, deps.pollIntervalMs ?? CONNECTIVITY_POLL_MS)
 
@@ -331,6 +389,13 @@ export function main(deps: MainDeps = {}): void {
     // `attention` disposes with the rest: quitting mid-wait must not leave a
     // bouncing Dock icon behind (see AttentionManager#dispose).
     active = [client, tray, notifier, attention, { dispose: () => clearInterval(pollTimer) }]
+  }).catch((err: Error) => {
+    // Without this, ANY throw inside the whenReady callback aborted the rest
+    // of startup silently: no engine connection, no notifications, and an
+    // `active` array still empty so the live Tray had no disposal path. A
+    // packaged GUI app has no stderr anyone reads, so the user would simply
+    // see an inert icon and conclude the product does not work.
+    console.error(`nudge tray: startup failed: ${err.stack ?? err.message}`)
   })
 
   surface.onBeforeQuit(() => {

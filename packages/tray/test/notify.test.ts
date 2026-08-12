@@ -8,6 +8,7 @@ import { describe, it, expect, vi } from 'vitest'
 vi.mock('electron', () => ({ Notification: vi.fn() }))
 
 import type { SessionState } from '@nudge/shared/types'
+import { DEFAULT_CONFIG, type NudgeConfig } from '@nudge/shared/config'
 import { Notifier, notificationContent, type NotifySurface, type NotificationLike } from '../src/notify.js'
 
 const session = (over: Partial<SessionState> = {}): SessionState => ({
@@ -240,5 +241,95 @@ describe('Notifier: dispose', () => {
 
     expect(created[0].close).toHaveBeenCalledTimes(1)
     expect(created[1].close).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('Notifier: suppression — the tray is the ONLY banner source while it runs', () => {
+  /**
+   * Whole-branch review, Critical. The tray declares `gui: true`, so the
+   * engine stands its own banner down and defers to this module. This module
+   * used to check only tier + snooze — so `nudge mute` silenced the engine
+   * and the tray notified anyway. The user muted Nudge and Nudge kept
+   * notifying them, with no escape short of quitting the tray.
+   *
+   * These drive the real suppression path with an injected config; none of
+   * them touches the real ~/.nudge/config.json.
+   */
+  const cfg = (over: Partial<NudgeConfig> = {}): NudgeConfig => ({
+    ...structuredClone(DEFAULT_CONFIG),
+    ...over,
+  })
+
+  it('a globally muted session raises NO banner', () => {
+    const { surface, created } = makeSurface()
+    const notifier = new Notifier(vi.fn(), surface, { loadConfig: () => cfg({ muted: true }), now: () => 100 })
+
+    notifier.update([session({ tier: 'blocked' })])
+
+    expect(created).toHaveLength(0)
+  })
+
+  it('still notifies when not muted — the suppression must not be unconditional', () => {
+    const { surface, created } = makeSurface()
+    const notifier = new Notifier(vi.fn(), surface, { loadConfig: () => cfg(), now: () => 100 })
+
+    notifier.update([session({ tier: 'blocked' })])
+
+    expect(created).toHaveLength(1)
+  })
+
+  it('a per-project mute scopes to that project only', () => {
+    const { surface, created } = makeSurface()
+    const c = cfg({ projects: { '/a/muted-repo': { muted: true } } })
+    const notifier = new Notifier(vi.fn(), surface, { loadConfig: () => c, now: () => 100 })
+
+    notifier.update([
+      session({ sessionId: 's1', cwd: '/a/muted-repo', tier: 'blocked' }),
+      session({ sessionId: 's2', cwd: '/a/other-repo', tier: 'blocked' }),
+    ])
+
+    expect(created).toHaveLength(1)
+  })
+
+  it('a tier the user switched off never notifies', () => {
+    const { surface, created } = makeSurface()
+    const c = cfg()
+    c.tiers['idle-short'].enabled = false
+    const notifier = new Notifier(vi.fn(), surface, { loadConfig: () => c, now: () => 100 })
+
+    notifier.update([session({ tier: 'idle-short', status: 'idle' })])
+
+    expect(created).toHaveLength(0)
+  })
+
+  it('muting mid-wait CLOSES the banner already on screen, rather than leaving it stranded', () => {
+    const { surface, created } = makeSurface()
+    let muted = false
+    const notifier = new Notifier(vi.fn(), surface, {
+      loadConfig: () => cfg({ muted }), now: () => 100,
+    })
+
+    notifier.update([session({ tier: 'blocked' })])
+    expect(created).toHaveLength(1)
+
+    muted = true
+    notifier.update([session({ tier: 'blocked' })])
+
+    expect(created[0]?.close).toHaveBeenCalledTimes(1)
+  })
+
+  it('a broken config falls back to last-known-good rather than stranding banners', () => {
+    const { surface, created } = makeSurface()
+    let broken = false
+    const notifier = new Notifier(vi.fn(), surface, {
+      loadConfig: () => { if (broken) throw new Error('EACCES'); return cfg() },
+      now: () => 100,
+    })
+
+    notifier.update([session({ tier: 'blocked' })])
+    broken = true
+    notifier.update([]) // resolved, but the config can no longer be read
+
+    expect(created[0]?.close).toHaveBeenCalledTimes(1)
   })
 })
