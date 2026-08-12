@@ -314,10 +314,105 @@ window if it doesn't pick it up immediately.
 Two settings (`nudge.showToasts`, `nudge.socketPath`) are documented inline
 in VS Code's Settings UI under "Nudge".
 
+## The tray app
+
+`packages/tray` is an Electron menu-bar/system-tray app (`nudge-tray`,
+product name "Nudge"). Like the extension, it is a *client* of the same
+engine socket — it holds no state and makes no decisions of its own.
+
+**You do not need it if you live in VS Code.** The extension already gives
+you a status bar item, toasts, and click-to-jump. The tray earns its place
+when you *leave* the editor, which is exactly when you miss things:
+
+- **A menu-bar icon that is always visible**, whatever app you are in — with
+  a badge of how many sessions are waiting, and a menu listing each one
+  (project, tier, how long it has waited) that jumps straight to it.
+- **A clickable OS notification.** Phase 1's `osascript` / `notify-send`
+  banner cannot carry a click action; this one can, and it lands on the same
+  focus path as everything else.
+- **Focus from outside any editor** — VS Code, Cursor, Windsurf, the Claude
+  desktop app, Terminal.app, iTerm2, Windows Terminal, or a clipboard
+  fallback when it cannot identify the surface.
+- **Persistent attention that does not time out.** On macOS the Dock icon
+  appears and **bounces until you deal with it**; on Windows/Linux the
+  taskbar button flashes. A notification banner disappears after a few
+  seconds, so one glance away loses it — this does not.
+- **Start at login**, from the tray menu.
+
+**Both can run at once**, and that is a supported setup rather than a
+conflict. They subscribe independently, and the engine deliberately treats
+them differently: the tray announces itself as a GUI client, so while it is
+connected the engine skips its own non-clickable banner and lets the tray
+raise a clickable one instead — while still playing the alert sound and its
+escalation repeats. Only the extension reports which window is frontmost.
+
+### Persistent attention (the Dock bounce)
+
+On by default for the tiers that escalate — `blocked` and `idle-long` — and
+deliberately **not** for `idle-short`, because an icon that bounced until
+dismissed every time a turn finished would train you to ignore it.
+
+It obeys every rule the other alerts obey: mute, per-project mute, snooze,
+and a tier you have disabled all suppress it. Answering the prompt stops the
+bounce and removes the Dock icon again.
+
+Tune it with a `tray` section in `~/.nudge/config.json` (the engine ignores
+this key — it belongs to the tray):
+
+```jsonc
+{
+  "tray": {
+    "bounceOnBlocked": true,               // master switch: false disables it entirely
+    "bounceTiers": ["blocked", "idle-long"]
+  }
+}
+```
+
+An invalid `tray` section is reported on stderr and ignored — the app starts
+on defaults rather than refusing to boot.
+
+### Build and run it
+
+```bash
+npm install                  # from the repo root, if you haven't already
+npm run bundle -w nudge-tray # esbuild -> dist/index.cjs, plus icons -> dist/assets
+npm start -w nudge-tray      # run it straight out of the repo
+```
+
+To build an installable artefact:
+
+```bash
+npm run pack -w nudge-tray   # unpacked .app/.exe tree in packages/tray/release/
+npm run dist -w nudge-tray   # .dmg / .exe / .AppImage
+```
+
+**The build is unsigned.** Signing macOS builds needs a paid Apple Developer
+account, which this project does not have, so Gatekeeper quarantines the
+`.dmg` and macOS reports that the app "is damaged" or "cannot be opened".
+Right-click the app → **Open** → **Open**, or clear the flag yourself:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Nudge.app
+```
+
+That is a real cost of an unsigned build, not a formality to wave past — if
+you are not willing to do it, use the VS Code extension instead.
+
 ## Limitations
 
 These are real limits, not caveats to skim past — you will hit them.
 
+- **The tray's Windows and Linux taskbar flash is unverified.** It was
+  written and tested on macOS, where that code path never runs. The call
+  sequence is asserted in tests; no real Windows taskbar has been observed
+  flashing. On Linux it maps to an urgency hint that some desktop
+  environments ignore outright, so treat it as best-effort.
+- **Nothing tells the tray which window you are looking at.** The engine
+  tracks the frontmost session (the VS Code extension reports it) but does
+  not include it in the state it broadcasts, so no client can see it. The
+  Dock will therefore bounce even while you are looking at the very window
+  that is waiting. The suppression rule is implemented and tested on the
+  tray side; closing the gap needs a field added to the engine's broadcast.
 - **The OS-level desktop notification itself is still not clickable.**
   Desktop notifications are fire-and-forget platform CLIs (`osascript` /
   `notify-send` / a PowerShell balloon tip); clicking one does nothing, and

@@ -4,3 +4,6 @@ dist/
 *.tsbuildinfo
 .nudge-test/
 *.vsix
+
+# electron-builder output (packaged apps, ~200MB per target)
+packages/tray/release/

@@ -17,9 +17,12 @@ vi.mock('electron', () => ({
 
 import type { SessionState } from '@nudge/shared/types'
 import type { ClientMessage } from '@nudge/shared/protocol'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   NudgeTray, resolveIcon, formatWaitDuration,
-  type TraySurface, type TrayIconLike, type MenuItemSpec, type TrayCallbacks,
+  type TraySurface, type TrayIconLike, type MenuItemSpec, type TrayCallbacks, type IconState,
 } from '../src/tray.js'
 
 const session = (over: Partial<SessionState> = {}): SessionState => ({
@@ -93,13 +96,25 @@ function makeSurface() {
   return { surface, icon, loadedImages, builtMenus, lastMenu: () => builtMenus[builtMenus.length - 1] }
 }
 
-function makeCallbacks() {
+function makeCallbacks(opts: { atLogin?: boolean } = {}) {
   const onFocusSession = vi.fn()
   const onStartEngine = vi.fn()
   const onOpenHistoryFolder = vi.fn()
   const onQuit = vi.fn()
-  const callbacks: TrayCallbacks = { onFocusSession, onStartEngine, onOpenHistoryFolder, onQuit }
-  return { callbacks, onFocusSession, onStartEngine, onOpenHistoryFolder, onQuit }
+  // Backed by a mutable cell rather than a fixed value so a test can prove
+  // the menu re-reads the live OS state instead of caching it.
+  let atLogin = opts.atLogin ?? false
+  const isLaunchAtLogin = vi.fn(() => atLogin)
+  const onToggleLaunchAtLogin = vi.fn((on: boolean) => { atLogin = on })
+  const callbacks: TrayCallbacks = {
+    onFocusSession, onStartEngine, onOpenHistoryFolder,
+    isLaunchAtLogin, onToggleLaunchAtLogin, onQuit,
+  }
+  return {
+    callbacks, onFocusSession, onStartEngine, onOpenHistoryFolder, onQuit,
+    isLaunchAtLogin, onToggleLaunchAtLogin,
+    setAtLogin: (on: boolean) => { atLogin = on },
+  }
 }
 
 /** Finds a non-separator item by label; throws (via ! assertion) if absent — tests should fail loudly, not silently pass on `undefined`. */
@@ -304,6 +319,49 @@ describe('NudgeTray: Open history folder / Quit', () => {
     expect(onOpenHistoryFolder).toHaveBeenCalledTimes(1)
   })
 
+  it('"Start at login" is unchecked when the OS has no login item, and enabling it calls through', () => {
+    const { surface, lastMenu } = makeSurface()
+    const { callbacks, onToggleLaunchAtLogin } = makeCallbacks({ atLogin: false })
+    const tray = new NudgeTray(vi.fn(), callbacks, surface)
+
+    tray.render([], true)
+    const item = findItem(lastMenu(), 'Start at login')
+    expect(item.type).toBe('checkbox')
+    expect('checked' in item && item.checked).toBe(false)
+
+    item.click?.()
+    expect(onToggleLaunchAtLogin).toHaveBeenCalledWith(true)
+  })
+
+  it('"Start at login" shows checked when the OS already has a login item, and clicking turns it OFF', () => {
+    const { surface, lastMenu } = makeSurface()
+    const { callbacks, onToggleLaunchAtLogin } = makeCallbacks({ atLogin: true })
+    const tray = new NudgeTray(vi.fn(), callbacks, surface)
+
+    tray.render([], true)
+    const item = findItem(lastMenu(), 'Start at login')
+    expect('checked' in item && item.checked).toBe(true)
+
+    // Load-bearing: a toggle hardcoded to `true` would pass the test above
+    // and leave the user unable to ever turn it off.
+    item.click?.()
+    expect(onToggleLaunchAtLogin).toHaveBeenCalledWith(false)
+  })
+
+  it('re-reads the live login state on every render — the user can change it in OS settings', () => {
+    const { surface, lastMenu } = makeSurface()
+    const { callbacks, setAtLogin } = makeCallbacks({ atLogin: false })
+    const tray = new NudgeTray(vi.fn(), callbacks, surface)
+
+    tray.render([], true)
+    expect(findItem(lastMenu(), 'Start at login')).toMatchObject({ checked: false })
+
+    setAtLogin(true) // as if changed in System Settings, outside this app
+    tray.render([], true)
+
+    expect(findItem(lastMenu(), 'Start at login')).toMatchObject({ checked: true })
+  })
+
   it('"Quit" calls onQuit', () => {
     const { surface, lastMenu } = makeSurface()
     const { callbacks, onQuit } = makeCallbacks()
@@ -353,5 +411,45 @@ describe('NudgeTray: disposal', () => {
 
     expect(icon.setImage).not.toHaveBeenCalled()
     expect(icon.setToolTip).not.toHaveBeenCalled()
+  })
+})
+
+describe('icon assets exist on disk (packaging guard)', () => {
+  /**
+   * Every other test in this file injects a fake `loadImage`, so nothing here
+   * has ever touched the filesystem — which means a renamed, missing, or
+   * un-copied PNG would sail through the whole suite and only show up as a
+   * blank menu-bar icon in the built app. Phase 2 shipped exactly that class
+   * of defect: 84 green tests and a `.vsix` that would not load.
+   *
+   * Asserts against the SOURCE assets (what is committed). The build output
+   * is covered separately by the `copy-assets` guard below.
+   */
+  const SRC_ASSETS = fileURLToPath(new URL('../src/assets', import.meta.url))
+
+  const combos: Array<{ state: IconState; platform: NodeJS.Platform; dark: boolean }> = [
+    { state: 'idle', platform: 'darwin', dark: true },
+    { state: 'idle', platform: 'darwin', dark: false },
+    { state: 'waiting', platform: 'darwin', dark: true },
+    { state: 'waiting', platform: 'darwin', dark: false },
+    { state: 'unreachable', platform: 'darwin', dark: true },
+    { state: 'unreachable', platform: 'darwin', dark: false },
+    { state: 'idle', platform: 'win32', dark: false },
+    { state: 'waiting', platform: 'linux', dark: true },
+  ]
+
+  for (const c of combos) {
+    it(`${c.state}/${c.platform}/${c.dark ? 'dark' : 'light'} resolves to a file that exists`, () => {
+      const { file } = resolveIcon(c.state, { platform: c.platform, dark: c.dark })
+      expect(existsSync(join(SRC_ASSETS, file)), `${file} is missing from src/assets`).toBe(true)
+    })
+  }
+
+  it('ships a @2x variant for every icon, or macOS renders it blurry on Retina', () => {
+    for (const c of combos) {
+      const { file } = resolveIcon(c.state, { platform: c.platform, dark: c.dark })
+      const retina = file.replace(/\.png$/, '@2x.png')
+      expect(existsSync(join(SRC_ASSETS, retina)), `${retina} is missing`).toBe(true)
+    }
   })
 })

@@ -14,16 +14,17 @@ import type { SessionState } from '@nudge/shared/types'
 declare const __dirname: string | undefined
 const here = typeof __dirname === 'string' ? __dirname : dirname(fileURLToPath(import.meta.url))
 // `here` is always dist/ (whether from `tsc --build`'s real ESM output or
-// esbuild's bundled CJS output) — but nothing copies the committed PNGs
-// under src/assets into dist/assets, on either build path. Pointed at the
-// source tree instead of the build output, which is correct for every way
-// this app runs today (tests inject a fake loadImage() and never touch the
-// filesystem at all; `electron .` in dev runs straight out of this
-// monorepo, where src/ is always a sibling of dist/). A future packaged
-// artefact (Task 6) will need to either ship src/assets alongside dist, or
-// add a real copy-into-dist step and update this path to match — flagged
-// here rather than silently assumed.
-const ASSETS_DIR = join(here, '..', 'src', 'assets')
+// esbuild's bundled CJS output), and the `copy-assets` build step puts the
+// committed PNGs at dist/assets on both paths.
+//
+// This used to point at `../src/assets` — the source tree — because nothing
+// copied them into the build output. That worked for every way the app ran
+// at the time (tests inject a fake loadImage() and never touch the
+// filesystem; `electron .` in dev runs out of the monorepo where src/ is a
+// sibling of dist/) and would have broken the moment it was packaged, since
+// electron-builder ships dist/ and not src/. Resolving inside the build
+// output is what makes the packaged artefact work.
+const ASSETS_DIR = join(here, 'assets')
 
 const SNOOZE_MS = 600_000
 
@@ -82,6 +83,7 @@ export type TrayImageLike = unknown
 export type MenuItemSpec =
   | { type: 'separator' }
   | { type?: 'normal'; label: string; enabled?: boolean; click?: () => void }
+  | { type: 'checkbox'; label: string; checked: boolean; click?: () => void }
 
 /**
  * The minimal shape of a real `electron.Tray` this module touches. A real
@@ -151,6 +153,13 @@ export interface TrayCallbacks {
   /** "Start engine" — only ever offered while unreachable (see #menuItems). */
   onStartEngine(): void
   onOpenHistoryFolder(): void
+  /**
+   * Current launch-at-login state, read fresh each time the menu is built so
+   * the checkmark reflects what the OS actually has registered rather than
+   * what this process last set.
+   */
+  isLaunchAtLogin(): boolean
+  onToggleLaunchAtLogin(on: boolean): void
   onQuit(): void
 }
 
@@ -278,6 +287,15 @@ export class NudgeTray {
       },
     })
     items.push({ label: 'Open history folder', click: () => this.#callbacks.onOpenHistoryFolder() })
+    // Read live rather than cached: the user can also change this in the OS's
+    // own login-items settings, and a stale checkmark would be a lie.
+    const atLogin = this.#callbacks.isLaunchAtLogin()
+    items.push({
+      type: 'checkbox',
+      label: 'Start at login',
+      checked: atLogin,
+      click: () => this.#callbacks.onToggleLaunchAtLogin(!atLogin),
+    })
     items.push({ label: 'Quit', click: () => this.#callbacks.onQuit() })
     return items
   }

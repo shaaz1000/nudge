@@ -2,20 +2,24 @@
   "name": "nudge-tray",
   "version": "0.1.0",
   "private": true,
+  "description": "Nudge — tells you when Claude Code is waiting on you",
+  "author": "Nudge",
   "type": "module",
   "main": "./dist/index.cjs",
   "engines": { "node": ">=22.5.0" },
   "scripts": {
-    "build": "tsc --build",
-    "bundle": "esbuild src/index.ts --bundle --outfile=dist/index.cjs --platform=node --format=cjs --external:electron --target=node20",
-    "start": "npm run bundle && electron ."
-  },
-  "dependencies": {
-    "@nudge/client": "0.1.0",
-    "@nudge/shared": "0.1.0"
+    "copy-assets": "node -e \"require('node:fs').cpSync('src/assets','dist/assets',{recursive:true})\"",
+    "build": "tsc --build && npm run copy-assets",
+    "bundle": "esbuild src/index.ts --bundle --outfile=dist/index.cjs --platform=node --format=cjs --external:electron --target=node20 && npm run copy-assets",
+    "start": "npm run bundle && electron .",
+    "pack": "npm run bundle && electron-builder --dir",
+    "dist": "npm run bundle && electron-builder"
   },
   "devDependencies": {
-    "electron": "^33.0.0",
+    "@nudge/client": "0.1.0",
+    "@nudge/shared": "0.1.0",
+    "electron": "33.4.11",
+    "electron-builder": "^25.1.8",
     "esbuild": "^0.21.5"
   }
 }

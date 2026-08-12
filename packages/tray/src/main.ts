@@ -81,6 +81,8 @@ export interface AppSurface {
   whenReady(): Promise<void>
   onSecondInstance(cb: () => void): void
   onBeforeQuit(cb: () => void): void
+  getLoginItemEnabled(): boolean
+  setLoginItemEnabled(on: boolean): void
 }
 
 function defaultAppSurface(): AppSurface {
@@ -90,6 +92,11 @@ function defaultAppSurface(): AppSurface {
     whenReady: () => app.whenReady(),
     onSecondInstance: cb => { app.on('second-instance', () => cb()) },
     onBeforeQuit: cb => { app.on('before-quit', () => cb()) },
+    getLoginItemEnabled: () => app.getLoginItemSettings().openAtLogin,
+    // `openAsHidden` is macOS-only and ignored elsewhere; for a menu-bar app
+    // there is nothing to show at login anyway, so starting hidden is right
+    // on every platform that honours it.
+    setLoginItemEnabled: on => { app.setLoginItemSettings({ openAtLogin: on, openAsHidden: true }) },
   }
 }
 
@@ -236,6 +243,8 @@ export function main(deps: MainDeps = {}): void {
       onFocusSession: s => { void focus(s) },
       onStartEngine: () => spawnEngine(),
       onOpenHistoryFolder: () => openHistoryFolder(nudgeHome()),
+      isLaunchAtLogin: () => surface.getLoginItemEnabled(),
+      onToggleLaunchAtLogin: on => surface.setLoginItemEnabled(on),
       onQuit: () => surface.quit(),
     }
 

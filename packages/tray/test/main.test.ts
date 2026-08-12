@@ -115,6 +115,7 @@ function makeSurface(opts: { locked?: boolean } = {}) {
   const secondInstanceHandlers: Array<() => void> = []
   const beforeQuitHandlers: Array<() => void> = []
   const quit = vi.fn()
+  let loginItem = false
   let readyResolve: (() => void) | undefined
   const surface: AppSurface = {
     requestSingleInstanceLock: () => opts.locked ?? true,
@@ -122,6 +123,10 @@ function makeSurface(opts: { locked?: boolean } = {}) {
     whenReady: () => new Promise<void>(resolve => { readyResolve = resolve }),
     onSecondInstance: cb => { secondInstanceHandlers.push(cb) },
     onBeforeQuit: cb => { beforeQuitHandlers.push(cb) },
+    // Faked like everything else on this surface: the real ones read and
+    // write the OS's login items, which this suite must never touch.
+    getLoginItemEnabled: () => loginItem,
+    setLoginItemEnabled: on => { loginItem = on },
   }
   return {
     surface,
