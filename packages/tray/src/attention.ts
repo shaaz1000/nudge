@@ -50,14 +50,24 @@ export const DEFAULT_ATTENTION_CONFIG: AttentionConfig = {
  * the user believes they have disabled something that is still running.
  */
 export function loadAttentionConfig(path = configPath()): AttentionConfig {
-  let raw: unknown
+  let text: string
   try {
-    raw = JSON.parse(readFileSync(path, 'utf8'))
+    text = readFileSync(path, 'utf8')
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return DEFAULT_ATTENTION_CONFIG
+    // Rethrown unwrapped, exactly as @nudge/shared's readRawConfig does: an
+    // EACCES or EISDIR is not a parse failure and must not be reported as one.
+    throw err
+  }
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch (err) {
     throw new Error(`tray config: could not parse ${path} as JSON (${(err as Error).message})`)
   }
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return DEFAULT_ATTENTION_CONFIG
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error(`tray config: top level of ${path} must be an object`)
+  }
   const tray = (raw as Record<string, unknown>).tray
   if (tray === undefined) return DEFAULT_ATTENTION_CONFIG
   if (typeof tray !== 'object' || tray === null || Array.isArray(tray)) {
@@ -170,6 +180,22 @@ export function needsAttention(
   )
 }
 
+/** The real `app.dock`, narrowed to what `defaultSurface` drives. `show()` is async on the real API. */
+export interface RealDockLike {
+  show(): Promise<void>
+  hide(): void
+  bounce(type: 'critical' | 'informational'): number
+  cancelBounce(id: number): void
+}
+
+/** Injection points for `defaultSurface`, so its one side effect (hiding the Dock) is testable. */
+export interface DefaultSurfaceDeps {
+  platform?: string
+  /** Present-but-undefined means "this machine has no Dock" — distinct from omitted, which reads the real `app.dock`. */
+  dock?: RealDockLike | undefined
+  makeFlashWindow?: () => FlashSurface
+}
+
 /** The window methods `lazyFlashWindow` drives — a real BrowserWindow satisfies this structurally. */
 export interface FlashWindowLike {
   isDestroyed(): boolean
@@ -264,10 +290,11 @@ function defaultFlashWindow(): FlashWindowLike {
  * become conditional after the first completed bounce cycle happened to hide
  * it.
  */
-export function defaultSurface(): AttentionSurface {
-  const platform = process.platform
+export function defaultSurface(deps: DefaultSurfaceDeps = {}): AttentionSurface {
+  const platform = deps.platform ?? process.platform
+  const makeFlash = deps.makeFlashWindow ?? (() => lazyFlashWindow())
   if (platform === 'darwin') {
-    const dock = app.dock
+    const dock = 'dock' in deps ? deps.dock : app.dock
     if (!dock) return { platform, dock: null, flashWindow: null }
     dock.hide()
     return {
@@ -287,7 +314,7 @@ export function defaultSurface(): AttentionSurface {
       flashWindow: null,
     }
   }
-  return { platform, dock: null, flashWindow: lazyFlashWindow() }
+  return { platform, dock: null, flashWindow: makeFlash() }
 }
 
 /**
@@ -372,9 +399,11 @@ export class AttentionManager {
 
   #start(): void {
     const dock = this.#dock()
+    let shown = false
     try {
       if (dock) {
         dock.show()
+        shown = true
         // 'critical' bounces until the app is activated; 'informational' is a
         // single hop that is over before the user turns around, which defeats
         // the entire point of this module.
@@ -387,6 +416,12 @@ export class AttentionManager {
       // later resolve must not think it has a bounce to cancel, and the next
       // update should be free to try again.
       console.error(`nudge tray: could not raise persistent attention: ${(err as Error).message}`)
+      // But a Dock icon that was shown before the failure would otherwise sit
+      // there permanently: `#attracting` stays false, so no later `#stop()`
+      // will ever hide it.
+      if (shown && dock) {
+        try { dock.hide() } catch { /* nothing further to try */ }
+      }
       return
     }
     this.#attracting = true

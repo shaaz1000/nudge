@@ -8,28 +8,33 @@ import { describe, it, expect, vi } from 'vitest'
 // exist so importing '../src/attention.js' does not throw, and so a
 // forgotten override in a FUTURE test fails loudly against a fake rather
 // than bouncing the real Dock on this machine.
+// Kept deliberately faithful to the real API rather than convenient: `show()`
+// is async on the real `app.dock` (defaultSurface awaits its rejection), and
+// the window methods are the ones the code actually calls — `showInactive`,
+// not `show`. An earlier version of this mock offered `show`/`isVisible` and
+// no `showInactive`, a divergence that went unnoticed only because nothing
+// reached the code under it. A mock that drifts from the real surface is how
+// a passing suite hides a broken app.
 vi.mock('electron', () => ({
   app: {
     dock: {
-      show: vi.fn(),
+      show: vi.fn(async () => {}),
       hide: vi.fn(),
       bounce: vi.fn(() => 1),
       cancelBounce: vi.fn(),
     },
   },
   BrowserWindow: vi.fn().mockImplementation(() => ({
-    show: vi.fn(),
+    showInactive: vi.fn(),
     minimize: vi.fn(),
-    isVisible: vi.fn(() => false),
     isDestroyed: vi.fn(() => false),
     flashFrame: vi.fn(),
     destroy: vi.fn(),
-    on: vi.fn(),
   })),
 }))
 
 import type { SessionState } from '@nudge/shared/types'
-import { DEFAULT_CONFIG, type NudgeConfig } from '@nudge/shared/config'
+import { DEFAULT_CONFIG, loadConfig as loadNudgeConfig, type NudgeConfig } from '@nudge/shared/config'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -38,6 +43,7 @@ import {
   DEFAULT_ATTENTION_CONFIG,
   DEFAULT_BOUNCE_TIERS,
   isSessionSuppressed,
+  defaultSurface,
   isTierEligible,
   lazyFlashWindow,
   loadAttentionConfig,
@@ -159,6 +165,36 @@ describe('loadAttentionConfig: the user-facing off switch (Step 6)', () => {
 
   it('throws when tray is not an object', () => {
     expect(() => loadAttentionConfig(write({ tray: 'off' }))).toThrow(/must be an object/)
+  })
+
+  it('throws when tray is an array — arrays are objects to typeof, the classic hole', () => {
+    expect(() => loadAttentionConfig(write({ tray: ['blocked'] }))).toThrow(/must be an object/)
+  })
+
+  it('throws on a non-object JSON root, matching mergeConfig rather than silently defaulting', () => {
+    expect(() => loadAttentionConfig(write(5))).toThrow(/top level/)
+  })
+
+  it('reports a read error as itself, not as a JSON parse failure', () => {
+    // A directory yields EISDIR. The shared config deliberately rethrows fs
+    // errors unwrapped for exactly this reason: an unreadable file is not a
+    // malformed one, and saying "could not parse" sends the user hunting for
+    // a syntax error that isn't there.
+    const dir = mkdtempSync(join(tmpdir(), 'nudge-tray-cfg-'))
+    expect(() => loadAttentionConfig(dir)).toThrow(/EISDIR|illegal operation on a directory/)
+  })
+
+  /**
+   * The cross-package contract this whole feature rests on: the tray writes
+   * its key into the SAME config.json the engine reads. If `mergeConfig` were
+   * ever hardened with a strict unknown-top-level-key sweep, every user who
+   * set `tray.bounceOnBlocked` would find the ENGINE refusing to boot — a
+   * failure that would look nothing like the tray change that caused it.
+   */
+  it('a config carrying a tray key is still accepted by the engine\'s own loader', () => {
+    const p = write({ muted: false, tray: { bounceOnBlocked: false } })
+    expect(() => loadNudgeConfig(p)).not.toThrow()
+    expect(loadNudgeConfig(p).muted).toBe(false)
   })
 })
 
@@ -586,6 +622,21 @@ describe('AttentionManager: a throwing surface must not wedge the manager', () =
     expect(dock.cancelBounce).not.toHaveBeenCalled()
   })
 
+  it('hides a Dock it showed when bounce() then throws, rather than stranding the icon', () => {
+    const dock: DockSurface = {
+      show: vi.fn(), hide: vi.fn(),
+      bounce: vi.fn(() => { throw new Error('dock is gone') }),
+      cancelBounce: vi.fn(),
+    }
+    const surface: AttentionSurface = { platform: 'darwin', dock, flashWindow: null }
+    const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
+
+    attn.update([session({ tier: 'blocked' })])
+
+    // #attracting stayed false, so no later #stop() would ever hide it.
+    expect(dock.hide).toHaveBeenCalledTimes(1)
+  })
+
   it('retries on the next update after a failed start rather than giving up for good', () => {
     let fail = true
     const dock: DockSurface = {
@@ -634,6 +685,24 @@ describe('lazyFlashWindow: the Windows/Linux path (Steps 3-4), driven through an
     // Order matters: flashFrame against a window with no taskbar button is a
     // silent no-op, which is what makes this whole path fail invisibly.
     expect(calls).toEqual(['showInactive', 'minimize', 'flashFrame'])
+  })
+
+  /**
+   * The off path was previously asserted by nobody: deleting the
+   * `flashFrame(false)` branch outright left all seven of these tests green,
+   * which is a Windows/Linux taskbar flashing forever after the user has
+   * already answered — the exact analogue of the `cancelBounce` defect the
+   * plan calls load-bearing. Caught in re-review as the sixteenth
+   * test-that-cannot-fail in this project.
+   */
+  it('stops the flash on resolve — the load-bearing half of the taskbar path', () => {
+    const w = makeWin()
+    const surface = lazyFlashWindow(() => w)
+
+    surface.flash(true)
+    surface.flash(false)
+
+    expect(w.flashFrame).toHaveBeenLastCalledWith(false)
   })
 
   it('reuses the same window across flashes instead of creating one per alert', () => {
@@ -698,6 +767,65 @@ describe('lazyFlashWindow: the Windows/Linux path (Steps 3-4), driven through an
     surface.flash(true)
     surface.dispose?.()
     expect(w.destroy).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('defaultSurface: the hidden-Dock baseline (review finding 3)', () => {
+  // An Electron app launches WITH a Dock icon. Without this one hide() call,
+  // "the icon appears exactly when you are needed" is really "the icon is
+  // always there", and only becomes conditional after the first completed
+  // bounce cycle happens to hide it. Previously this line had no test at all.
+  function fakeDock() {
+    return {
+      show: vi.fn(async () => {}),
+      hide: vi.fn(),
+      bounce: vi.fn(() => 3),
+      cancelBounce: vi.fn(),
+    }
+  }
+
+  it('hides the Dock once while building the surface, so the icon starts absent', () => {
+    const dock = fakeDock()
+    const s = defaultSurface({ platform: 'darwin', dock })
+
+    expect(dock.hide).toHaveBeenCalledTimes(1)
+    expect(dock.show).not.toHaveBeenCalled()
+    expect(s.dock).not.toBeNull()
+  })
+
+  it('wires the returned surface through to the real dock methods', () => {
+    const dock = fakeDock()
+    const s = defaultSurface({ platform: 'darwin', dock })
+
+    expect(s.dock?.bounce('critical')).toBe(3)
+    expect(dock.bounce).toHaveBeenCalledWith('critical')
+    s.dock?.cancelBounce(3)
+    expect(dock.cancelBounce).toHaveBeenCalledWith(3)
+  })
+
+  it('a rejected dock.show() is caught, not left as an unhandled rejection in the main process', async () => {
+    const dock = fakeDock()
+    dock.show = vi.fn(async () => { throw new Error('dock unavailable') })
+    const s = defaultSurface({ platform: 'darwin', dock })
+
+    expect(() => s.dock?.show()).not.toThrow()
+    await new Promise(r => setTimeout(r, 0))
+  })
+
+  it('degrades to no persistent attention on a Mac with no dock rather than throwing', () => {
+    const s = defaultSurface({ platform: 'darwin', dock: undefined })
+    expect(s.dock).toBeNull()
+    expect(s.flashWindow).toBeNull()
+  })
+
+  it('uses the taskbar flash path off darwin, and never touches a dock there', () => {
+    const dock = fakeDock()
+    const flash: FlashSurface = { flash: vi.fn() }
+    const s = defaultSurface({ platform: 'win32', dock, makeFlashWindow: () => flash })
+
+    expect(s.dock).toBeNull()
+    expect(s.flashWindow).toBe(flash)
+    expect(dock.hide).not.toHaveBeenCalled()
   })
 })
 

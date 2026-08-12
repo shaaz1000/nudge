@@ -26,7 +26,14 @@ vi.mock('electron', () => ({
 
 import type { SessionState } from '@nudge/shared/types'
 import type { ClientMessage } from '@nudge/shared/protocol'
-import { main, type AppSurface, type EngineClientLike, type TrayLike, type NotifierLike, type AttentionLike } from '../src/main.js'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { DEFAULT_ATTENTION_CONFIG } from '../src/attention.js'
+import {
+  main, readAttentionConfig,
+  type AppSurface, type EngineClientLike, type TrayLike, type NotifierLike, type AttentionLike,
+} from '../src/main.js'
 
 const session = (over: Partial<SessionState> = {}): SessionState => ({
   sessionId: 's1', project: 'my-repo', cwd: '/a/my-repo',
@@ -387,6 +394,46 @@ describe('main: before-quit disposal', () => {
     expect(client.dispose).not.toHaveBeenCalled()
     expect(dispose).not.toHaveBeenCalled()
     expect(notifierDispose).not.toHaveBeenCalled()
+  })
+})
+
+describe('main: a broken tray config must not kill the app at launch', () => {
+  /**
+   * Re-review finding. `loadAttentionConfig` validates loudly, which is right
+   * for a typo in an off-switch — but the throw happened inside the
+   * un-caught `whenReady` callback, BEFORE `client.connect()` and before
+   * `active` was assigned. One mistyped key therefore left the user with a
+   * tray icon frozen on "nothing waiting", no engine connection, no
+   * notifications, a Dock already hidden, and nothing registered for
+   * disposal. A daemon can die loudly on stderr; a packaged GUI tray has no
+   * stderr anyone reads, so the failure was completely silent.
+   *
+   * Uses an isolated NUDGE_HOME — never the real ~/.nudge/config.json.
+   */
+  const withHome = <T>(configJson: string, fn: () => T): T => {
+    const home = mkdtempSync(join(tmpdir(), 'nudge-tray-home-'))
+    writeFileSync(join(home, 'config.json'), configJson, 'utf8')
+    const prev = process.env.NUDGE_HOME
+    process.env.NUDGE_HOME = home
+    try { return fn() } finally {
+      if (prev === undefined) delete process.env.NUDGE_HOME
+      else process.env.NUDGE_HOME = prev
+    }
+  }
+
+  it('falls back to defaults instead of throwing when the tray section is invalid', () => {
+    const cfg = withHome('{"tray":{"bounceOnBlockd":false}}', () => readAttentionConfig())
+    expect(cfg).toEqual(DEFAULT_ATTENTION_CONFIG)
+  })
+
+  it('falls back to defaults on malformed JSON rather than aborting the launch', () => {
+    const cfg = withHome('{ "tray": { ', () => readAttentionConfig())
+    expect(cfg).toEqual(DEFAULT_ATTENTION_CONFIG)
+  })
+
+  it('still honours a VALID tray section — the fallback must not swallow real settings', () => {
+    const cfg = withHome('{"tray":{"bounceOnBlocked":false}}', () => readAttentionConfig())
+    expect(cfg.bounceOnBlocked).toBe(false)
   })
 })
 

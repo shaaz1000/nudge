@@ -9,7 +9,10 @@ import type { ClientMessage } from '@nudge/shared/protocol'
 import { NudgeTray, type TrayCallbacks } from './tray.js'
 import { Notifier } from './notify.js'
 import { focusSession } from './focus.js'
-import { AttentionManager, defaultSurface as defaultAttentionSurface, loadAttentionConfig } from './attention.js'
+import {
+  AttentionManager, DEFAULT_ATTENTION_CONFIG, defaultSurface as defaultAttentionSurface,
+  loadAttentionConfig, type AttentionConfig,
+} from './attention.js'
 
 // esbuild's CJS output (used for the real, runnable app — see package.json's
 // `bundle` script) zeroes out `import.meta` entirely ("import.meta is not
@@ -112,6 +115,30 @@ function defaultSpawnEngine(): void {
 }
 
 const CONNECTIVITY_POLL_MS = 5_000
+
+/**
+ * `loadAttentionConfig` validates loudly, which is right for a typo in an
+ * off-switch — but a throw here would abort the whole `whenReady` callback,
+ * leaving the user with a tray icon frozen on "nothing waiting", no engine
+ * connection, no notifications, and nothing registered for disposal. A
+ * mistyped config key must not be able to kill the app.
+ *
+ * A daemon can afford to die loudly on stderr; a packaged GUI tray has no
+ * stderr anyone will ever read, so the failure would be completely silent —
+ * the exact "ships an app that silently does nothing" outcome the plan
+ * forbids. Degrade to defaults and log instead.
+ */
+export function readAttentionConfig(): AttentionConfig {
+  try {
+    return loadAttentionConfig()
+  } catch (err) {
+    console.error(
+      `nudge tray: ignoring the "tray" section of your config (${(err as Error).message}); `
+      + 'using defaults — persistent attention stays ON',
+    )
+    return DEFAULT_ATTENTION_CONFIG
+  }
+}
 
 export interface MainDeps {
   appSurface?: AppSurface
@@ -248,7 +275,7 @@ export function main(deps: MainDeps = {}): void {
     // which is the exact failure this product exists to fix.
     const attention: AttentionLike = deps.createAttention
       ? deps.createAttention()
-      : new AttentionManager(defaultAttentionSurface(), loadAttentionConfig())
+      : new AttentionManager(defaultAttentionSurface(), readAttentionConfig())
 
     let lastSessions: SessionState[] = []
     client.onState(sessions => {
@@ -269,6 +296,7 @@ export function main(deps: MainDeps = {}): void {
     // nothing would otherwise tell the tray to stop showing stale "waiting"
     // data. Mirrors the VS Code extension's identical fix
     // (extension.ts's CONNECTIVITY_POLL_MS) for the exact same gap.
+    let lastConnected = client.connected
     const pollTimer = setInterval(() => {
       tray.render(lastSessions, client.connected)
       // Attention is driven from the poll too, not just from broadcasts. If
@@ -277,7 +305,16 @@ export function main(deps: MainDeps = {}): void {
       // stopped by anything short of quitting Nudge. Treating "disconnected"
       // as "nothing waiting" clears it; the next broadcast after a reconnect
       // starts it again if the wait is still real.
-      attention.update(client.connected ? lastSessions : [])
+      //
+      // Only on a connectivity *flip*, not every tick: `update()` re-reads
+      // config.json, and doing that unconditionally would mean a synchronous
+      // read + validate + clone on the Electron main thread every 5 seconds
+      // for the entire time the app is logged in — plus a fresh error log
+      // every 5 seconds for anyone with a broken config.
+      if (client.connected !== lastConnected) {
+        lastConnected = client.connected
+        attention.update(client.connected ? lastSessions : [])
+      }
     }, deps.pollIntervalMs ?? CONNECTIVITY_POLL_MS)
 
     client.connect()
