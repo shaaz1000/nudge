@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
-  detectSurface, detectHostApp, detectSurfaceForHook,
+  detectSurface, detectHostApp, detectSurfaceForHook, isAgentBinary,
   parsePsOutput, parsePowershellOutput,
   parseTtyOutput, detectTtyPath,
   HOP_LIMIT, WALK_DEADLINE_MS, POSIX_HOP_TIMEOUT_MS, WINDOWS_HOP_TIMEOUT_MS,
@@ -291,5 +291,80 @@ describe('detectSurfaceForHook', () => {
       expect(s.tty).toBeUndefined()
       expect(s.app?.name).toBe('Claude')
     })
+  })
+})
+
+describe('the host-app walk must not stop on Claude Code itself', () => {
+  /**
+   * Reported from real use: a session started from the VS Code extension was
+   * recorded as `kind: 'desktop'`, so clicking the notification opened the
+   * Claude DESKTOP app while the user was working in VS Code.
+   *
+   * This is the actual chain, copied from the machine it happened on:
+   *
+   *   .../.vscode/extensions/anthropic.claude-code-2.1.220-darwin-arm64/
+   *       resources/native-binary/claude
+   *     <- Code Helper (Plugin)
+   *       <- /Applications/Visual Studio Code.app/Contents/MacOS/Code
+   *
+   * HOST_APP_PATTERN matched "claude" on the FIRST hop — the agent's own
+   * binary — and never reached VS Code. Every existing test passed because no
+   * fake probe had ever included the agent's own process in the chain: the
+   * fixtures started one level too high.
+   */
+  const VSCODE_CHAIN: Record<number, { comm: string; ppid: number }> = {
+    10: { comm: '/Users/x/.vscode/extensions/anthropic.claude-code-2.1.220-darwin-arm64/resources/native-binary/claude', ppid: 11 },
+    11: { comm: '/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)', ppid: 12 },
+    12: { comm: '/Applications/Visual Studio Code.app/Contents/MacOS/Code', ppid: 1 },
+  }
+  const chainProbe = (chain: Record<number, { comm: string; ppid: number }>): ProcessProbe =>
+    (pid: number) => chain[pid]
+
+  it('walks PAST the extension-bundled claude binary to the editor hosting it', () => {
+    const original = process.ppid
+    Object.defineProperty(process, 'ppid', { value: 10, configurable: true })
+    try {
+      const app = detectHostApp(chainProbe(VSCODE_CHAIN))
+      expect(app?.name).not.toBe('claude')
+      expect(app?.path).toMatch(/Visual Studio Code/)
+    } finally {
+      Object.defineProperty(process, 'ppid', { value: original, configurable: true })
+    }
+  })
+
+  it('still identifies the REAL Claude desktop app, which lives in an .app bundle', () => {
+    const chain = {
+      10: { comm: '/Applications/Claude.app/Contents/MacOS/Claude', ppid: 1 },
+    }
+    const original = process.ppid
+    Object.defineProperty(process, 'ppid', { value: 10, configurable: true })
+    try {
+      const app = detectHostApp(chainProbe(chain))
+      expect(app?.name).toBe('Claude')
+      expect(app?.path).toMatch(/Claude\.app/)
+    } finally {
+      Object.defineProperty(process, 'ppid', { value: original, configurable: true })
+    }
+  })
+})
+
+describe('isAgentBinary', () => {
+  it('treats the extension-bundled CLI as the agent, not a host app', () => {
+    expect(isAgentBinary('/Users/x/.vscode/extensions/anthropic.claude-code-2.1.220-darwin-arm64/resources/native-binary/claude')).toBe(true)
+  })
+
+  it('treats a bare `claude` on PATH as the agent', () => {
+    expect(isAgentBinary('claude')).toBe(true)
+    expect(isAgentBinary('/opt/homebrew/bin/claude')).toBe(true)
+  })
+
+  it('does NOT treat the real desktop app bundle as the agent', () => {
+    expect(isAgentBinary('/Applications/Claude.app/Contents/MacOS/Claude')).toBe(false)
+  })
+
+  it('leaves every other host application alone', () => {
+    expect(isAgentBinary('/Applications/Visual Studio Code.app/Contents/MacOS/Code')).toBe(false)
+    expect(isAgentBinary('Cursor')).toBe(false)
+    expect(isAgentBinary('windsurf')).toBe(false)
   })
 })

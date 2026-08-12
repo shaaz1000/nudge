@@ -204,6 +204,39 @@ export function detectTtyPath(
 
 const HOST_APP_PATTERN = /claude|code|cursor|windsurf/i
 
+/**
+ * True for Claude Code's OWN binary — the agent, not the application hosting
+ * it. This must be skipped or the walk terminates on its first hop and every
+ * session is misreported.
+ *
+ * Concretely, run from the VS Code extension the chain is:
+ *
+ *   .../.vscode/extensions/anthropic.claude-code-*\/native-binary/claude
+ *     <- Code Helper (Plugin)
+ *       <- /Applications/Visual Studio Code.app/.../Code
+ *
+ * HOST_APP_PATTERN matches that FIRST entry on "claude", so the walk returned
+ * the CLI and kindFromAppName mapped it to 'desktop'. Clicking the
+ * notification then tried to focus the Claude desktop app while the user was
+ * in VS Code — reported from real use, and invisible to every test here
+ * because no fake probe ever included the agent's own process.
+ *
+ * The distinguishing feature is the bundle: the real desktop app lives at
+ * `Claude.app/Contents/MacOS/Claude`, whereas the CLI is a bare executable
+ * whether it ships inside an editor extension or sits on $PATH. Anything not
+ * inside an application bundle is treated as the CLI and skipped.
+ */
+export function isAgentBinary(comm: string): boolean {
+  const base = comm.split(/[\\/]/).filter(Boolean).pop() ?? comm
+  if (!/^claude(\.exe)?$/i.test(base)) return false
+  // A real macOS application bundle -> the desktop app, so keep it.
+  if (/\.app[\\/]Contents[\\/]MacOS[\\/]/i.test(comm)) return false
+  // Windows: the desktop app installs under a Claude\ directory.
+  if (/\.exe$/i.test(base) && /[\\/]claude[\\/]/i.test(comm)) return false
+  return true
+}
+
+
 function nameAndPath(comm: string): { name: string; path?: string } {
   if (comm.includes('/') || comm.includes('\\')) {
     const parts = comm.split(/[\\/]/).filter(Boolean)
@@ -253,7 +286,8 @@ export function detectHostApp(
       const info = probe(pid)
       if (!info) return undefined
 
-      if (HOST_APP_PATTERN.test(info.comm)) {
+      // Skip our own binary and keep climbing: the agent is not its host.
+        if (HOST_APP_PATTERN.test(info.comm) && !isAgentBinary(info.comm)) {
         const { name, path } = nameAndPath(info.comm)
         return path ? { name, path, pid } : { name, pid }
       }
