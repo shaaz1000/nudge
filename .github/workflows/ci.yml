@@ -43,3 +43,29 @@ jobs:
       # so `@ts-expect-error` guards in tests were inert and an interface
       # change broke fakes at runtime rather than at compile time.
       - run: npx tsc -p tsconfig.test.json
+      # Run the REAL AttentionManager against the REAL Electron API on every
+      # platform. Every unit test injects a fake surface, so `defaultSurface()`
+      # and `lazyFlashWindow()` — all of the platform-specific behaviour — are
+      # executed by nothing. That gap hid a Linux crash (`getLoginItemSettings`
+      # does not exist there, and it took the whole app down before it ever
+      # connected) and two macOS Dock bugs. This is the only place the
+      # Windows/Linux taskbar path runs at all: development happens on macOS,
+      # where that branch never executes.
+      #
+      # It proves the API accepts the calls and that no window leaks (a leaked
+      # 1x1 window keeps Electron alive forever). It CANNOT prove a taskbar
+      # button visibly flashes — `flashFrame` on a window without one is a
+      # silent no-op. That stays an eyes-only check; see README Limitations.
+      - name: Electron smoke test (real API)
+        run: npx electron packages/tray/scripts/smoke-attention.mjs
+        if: runner.os != 'Linux'
+      - name: Electron smoke test (real API, xvfb)
+        run: xvfb-run -a npx electron packages/tray/scripts/smoke-attention.mjs
+        if: runner.os == 'Linux'
+      # And the taskbar-flash path specifically, forced on so macOS exercises
+      # the same BrowserWindow calls Windows and Linux make.
+      - name: Electron smoke test (taskbar flash path)
+        run: npx electron packages/tray/scripts/smoke-attention.mjs
+        env:
+          NUDGE_SMOKE_FORCE_FLASH: '1'
+        if: runner.os == 'macOS'

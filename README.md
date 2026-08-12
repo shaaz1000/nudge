@@ -431,11 +431,17 @@ These are real limits, not caveats to skim past — you will hit them.
   module does not exist, so "Start engine" failed with
   `ERR_UNKNOWN_BUILTIN_MODULE`. Pinned to Electron 43 (Node 24) for this
   reason — do not downgrade it.
-- **The tray's Windows and Linux taskbar flash is unverified.** It was
-  written and tested on macOS, where that code path never runs. The call
-  sequence is asserted in tests; no real Windows taskbar has been observed
-  flashing. On Linux it maps to an urgency hint that some desktop
-  environments ignore outright, so treat it as best-effort.
+- **Nobody has watched the Windows or Linux taskbar actually flash.**
+  Development happens on macOS, where that branch never runs. What IS
+  verified: the call sequence is asserted in unit tests, and CI runs the real
+  `AttentionManager` against the real Electron API on Windows, Linux and
+  macOS (`packages/tray/scripts/smoke-attention.mjs`), proving the calls are
+  accepted and no window leaks. What that cannot prove is the only thing that
+  matters to you — `flashFrame` against a window with no taskbar button is a
+  silent no-op, and no software check can see the difference. On Linux it
+  maps to an urgency hint some desktop environments ignore outright. Treat it
+  as best-effort, and if you run either platform, please say whether it
+  actually flashes.
 - **The OS-level desktop notification itself is still not clickable.**
   Desktop notifications are fire-and-forget platform CLIs (`osascript` /
   `notify-send` / a PowerShell balloon tip); clicking one does nothing, and
