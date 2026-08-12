@@ -113,6 +113,28 @@ describe('EngineServer', () => {
     a.s.end(); b.s.end()
   })
 
+  it('carries frontmost on the state frame, so clients can apply the same suppression the engine does', async () => {
+    // The engine has always tracked frontmost for its OWN alerts but never
+    // told anyone, so no client could honour it: the tray's Dock bounced at
+    // the user while they were looking at the very window that was waiting.
+    const a = await client()
+    a.s.write(encode({ t: 'subscribe', id: 1 }))
+    await a.next()
+    server.broadcast([session()], 'sess-42')
+    expect(await a.next()).toMatchObject({ t: 'state', frontmost: 'sess-42' })
+    a.s.end()
+  })
+
+  it('sends frontmost: null when nothing is focused, rather than omitting the key', async () => {
+    const a = await client()
+    a.s.write(encode({ t: 'subscribe', id: 1 }))
+    await a.next()
+    server.broadcast([session()], null)
+    const msg = await a.next() as { t: string; frontmost: string | null }
+    expect(msg.frontmost).toBeNull()
+    a.s.end()
+  })
+
   it('survives a client disconnecting mid-broadcast', async () => {
     const a = await client()
     a.s.write(encode({ t: 'subscribe', id: 1 }))

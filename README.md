@@ -353,8 +353,14 @@ deliberately **not** for `idle-short`, because an icon that bounced until
 dismissed every time a turn finished would train you to ignore it.
 
 It obeys every rule the other alerts obey: mute, per-project mute, snooze,
-and a tier you have disabled all suppress it. Answering the prompt stops the
-bounce and removes the Dock icon again.
+a tier you have disabled, and the window you are currently looking at all
+suppress it. Answering the prompt stops the bounce and removes the Dock icon
+again.
+
+That last one needs the VS Code extension running: it is what tells the
+engine which session is focused, and the engine passes it on to every client.
+Without the extension, nothing reports focus and the tray simply never
+suppresses on that ground.
 
 Tune it with a `tray` section in `~/.nudge/config.json` (the engine ignores
 this key — it belongs to the tray):
@@ -430,12 +436,6 @@ These are real limits, not caveats to skim past — you will hit them.
   sequence is asserted in tests; no real Windows taskbar has been observed
   flashing. On Linux it maps to an urgency hint that some desktop
   environments ignore outright, so treat it as best-effort.
-- **Nothing tells the tray which window you are looking at.** The engine
-  tracks the frontmost session (the VS Code extension reports it) but does
-  not include it in the state it broadcasts, so no client can see it. The
-  Dock will therefore bounce even while you are looking at the very window
-  that is waiting. The suppression rule is implemented and tested on the
-  tray side; closing the gap needs a field added to the engine's broadcast.
 - **The OS-level desktop notification itself is still not clickable.**
   Desktop notifications are fire-and-forget platform CLIs (`osascript` /
   `notify-send` / a PowerShell balloon tip); clicking one does nothing, and

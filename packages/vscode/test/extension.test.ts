@@ -65,7 +65,7 @@ const session = (over: Partial<SessionState> = {}): SessionState => ({
  * production engine socket.
  */
 function makeClient() {
-  let stateCb: ((s: SessionState[]) => void) | null = null
+  let stateCb: ((s: SessionState[], frontmost: string | null) => void) | null = null
   const sent: ClientMessage[] = []
   // Deliberately NOT typed as EngineClientLike here: that type's `connected`
   // is a readonly-in-practice getter mirror, and this fake needs to flip it
@@ -75,7 +75,7 @@ function makeClient() {
   // to a readonly-typed parameter is always sound.
   const client = {
     connected: true,
-    onState: (cb: (s: SessionState[]) => void) => { stateCb = cb },
+    onState: (cb: (s: SessionState[], frontmost: string | null) => void) => { stateCb = cb },
     send: (msg: ClientMessage) => { sent.push(msg) },
     connect: vi.fn(),
     dispose: vi.fn(),
@@ -83,7 +83,8 @@ function makeClient() {
   return {
     client,
     sent,
-    emit: (sessions: SessionState[]) => stateCb?.(sessions),
+    emit: (sessions: SessionState[], frontmost: string | null = null) =>
+      stateCb?.(sessions, frontmost),
   }
 }
 

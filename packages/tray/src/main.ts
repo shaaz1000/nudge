@@ -82,7 +82,7 @@ export interface TrayLike {
 
 /** The subset of Notifier this module needs — lets tests inject a fake notifier without touching Electron's real `Notification` at all. */
 export interface NotifierLike {
-  update(sessions: SessionState[]): void
+  update(sessions: SessionState[], frontmostSessionId?: string | null): void
   dispose(): void
 }
 
@@ -393,8 +393,10 @@ export function main(deps: MainDeps = {}): void {
       : new AttentionManager(defaultAttentionSurface(), readAttentionConfig())
 
     let lastSessions: SessionState[] = []
-    client.onState(sessions => {
+    let lastFrontmost: string | null = null
+    client.onState((sessions, frontmost) => {
       lastSessions = sessions
+      lastFrontmost = frontmost
       // Each consumer is isolated: the client swallows a throwing listener,
       // so without this a single failing render would silently stop the
       // notification AND the Dock bounce for that broadcast — and forever, if
@@ -402,12 +404,11 @@ export function main(deps: MainDeps = {}): void {
       // body for this reason; the ordering meant the other two could still
       // break it.
       guard('tray render', () => tray.render(sessions, client.connected))
-      guard('notification update', () => notifier.update(sessions))
-      // Frontmost is deliberately not passed: the engine tracks it privately
-      // (engine.ts's `#frontmost`) and does not include it in its state
-      // broadcast, so no client can observe it. AttentionManager implements
-      // and tests the rule regardless — see its `update` doc.
-      guard('attention update', () => attention.update(sessions))
+      guard('notification update', () => notifier.update(sessions, frontmost))
+      // Frontmost now arrives with the broadcast (the engine used to keep it
+      // private, so no client could apply the rule and the Dock bounced at
+      // you while you were looking at the very window that was waiting).
+      guard('attention update', () => attention.update(sessions, frontmost))
       const waiting = sessions.filter(s => s.tier !== null).length
       console.error(`nudge tray: state — ${waiting} waiting, connected=${client.connected}`)
     })
@@ -438,13 +439,14 @@ export function main(deps: MainDeps = {}): void {
       if (client.connected !== lastConnected) {
         lastConnected = client.connected
         if (!client.connected) {
+          lastFrontmost = null
           // Drop the pre-outage snapshot as well as clearing the alert.
           // Keeping it meant a reconnect re-raised a bounce from stale data —
           // for waits the user may well have answered while the engine was
           // down. The engine sends a fresh snapshot on reconnect anyway.
           lastSessions = []
         }
-        guard('attention update (poll)', () => attention.update(lastSessions))
+        guard('attention update (poll)', () => attention.update(lastSessions, lastFrontmost))
       }
     }, deps.pollIntervalMs ?? CONNECTIVITY_POLL_MS)
 

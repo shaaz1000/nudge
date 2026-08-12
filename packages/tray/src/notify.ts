@@ -172,7 +172,7 @@ export class Notifier {
     this.#now = deps.now ?? Date.now
   }
 
-  update(mine: SessionState[]): void {
+  update(mine: SessionState[], frontmostSessionId: string | null = null): void {
     if (this.#disposed) return
 
     // FULL suppression, not just snooze — see suppression.ts for why this is
@@ -201,7 +201,7 @@ export class Notifier {
       if (this.#lastGoodConfig === null) return
       cfg = this.#lastGoodConfig
     }
-    const waiting = (s: SessionState): boolean => isWaiting(cfg, s, now)
+    const waiting = (s: SessionState): boolean => isWaiting(cfg, s, now, frontmostSessionId)
     const waitingIds = new Set(mine.filter(waiting).map(s => s.sessionId))
 
     // Clear-on-resolve: close the OS notification (if still on screen) and

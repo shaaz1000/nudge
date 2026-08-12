@@ -42,7 +42,15 @@ export class Engine {
 
   sessions(): SessionState[] { return this.d.store.list() }
   setIdle(ms: number): void { this.#idleMs = ms }
-  setFrontmost(id: string | null): void { this.#frontmost = id }
+  setFrontmost(id: string | null): void {
+    if (this.#frontmost === id) return
+    this.#frontmost = id
+    // Broadcast immediately rather than waiting for the next hook event:
+    // focus changes are exactly when a client needs to start or stop
+    // suppressing, and a session can sit blocked for minutes with no state
+    // change at all.
+    this.d.server.broadcast(this.d.store.list(), this.#frontmost)
+  }
   idleMs(): number { return this.#idleMs }
 
   async start(): Promise<void> {
@@ -72,19 +80,19 @@ export class Engine {
       this.d.escalator.begin(s, s.tier)
     }
     this.d.watchdog.tick()
-    this.d.server.broadcast(this.d.store.list())
+    this.d.server.broadcast(this.d.store.list(), this.#frontmost)
   }
 
   handle(ev: NudgeEvent): void {
     const t = this.d.store.apply(ev)
     this.d.db.recordEvent(ev)
     this.#applyTransition(t, ev.hook, ev.ts)
-    this.d.server.broadcast(this.d.store.list())
+    this.d.server.broadcast(this.d.store.list(), this.#frontmost)
   }
 
   onWatchdogStall(t: Transition): void {
     this.#applyTransition(t, 'watchdog', this.d.clock.now())
-    this.d.server.broadcast(this.d.store.list())
+    this.d.server.broadcast(this.d.store.list(), this.#frontmost)
   }
 
   /**
@@ -100,7 +108,7 @@ export class Engine {
   onWatchdogDrop(sessionId: string): void {
     this.d.escalator.cancel(sessionId)
     this.d.db.closeWait(sessionId, this.d.clock.now(), 'ttl')
-    this.d.server.broadcast(this.d.store.list())
+    this.d.server.broadcast(this.d.store.list(), this.#frontmost)
   }
 
   /**
@@ -117,7 +125,7 @@ export class Engine {
   snooze(id: string, ms: number): void {
     this.d.store.snooze(id, ms)
     this.d.escalator.cancel(id)
-    this.d.server.broadcast(this.d.store.list())
+    this.d.server.broadcast(this.d.store.list(), this.#frontmost)
   }
 
   mute(on: boolean): void {
@@ -128,13 +136,13 @@ export class Engine {
       console.error('nudge engine: persistMuted failed', err)
     }
     if (on) this.d.escalator.cancelAll()
-    this.d.server.broadcast(this.d.store.list())
+    this.d.server.broadcast(this.d.store.list(), this.#frontmost)
   }
 
   resolve(id: string): void {
     const t = this.d.store.resolve(id)
     if (t) this.#applyTransition(t, 'manual', this.d.clock.now())
-    this.d.server.broadcast(this.d.store.list())
+    this.d.server.broadcast(this.d.store.list(), this.#frontmost)
   }
 
   /**
@@ -222,7 +230,7 @@ export class Engine {
       const live = this.d.store.get(s.sessionId)
       if (live) {
         live.pushFailed = !result.ok
-        this.d.server.broadcast(this.d.store.list())
+        this.d.server.broadcast(this.d.store.list(), this.#frontmost)
       }
     } catch (err) {
       console.error(`nudge engine: onPhone failed for ${s.sessionId}`, err)

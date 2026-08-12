@@ -47,7 +47,8 @@ export class EngineClient {
   #backoffMs: number
   #sock: Socket | null = null
   #dec = new NdjsonDecoder()
-  #listeners = new Set<(s: SessionState[]) => void>()
+  #listeners = new Set<(s: SessionState[], frontmost: string | null) => void>()
+  #frontmost: string | null = null
   #reconnectTimer: ReturnType<typeof setTimeout> | null = null
   #disposed = false
   #nextId = 1
@@ -75,7 +76,10 @@ export class EngineClient {
     return this.#connected
   }
 
-  onState(cb: (s: SessionState[]) => void): void {
+  /** The session the user is looking at, per the engine's last broadcast; null if unknown or unreported. */
+  get frontmost(): string | null { return this.#frontmost }
+
+  onState(cb: (s: SessionState[], frontmost: string | null) => void): void {
     this.#listeners.add(cb)
   }
 
@@ -150,12 +154,18 @@ export class EngineClient {
       // long-lived window — coincidentally match a later request. Cheap to
       // clear, and removes any doubt.
       this.#pendingListId = null
+      // A remembered frontmost from a dead engine would keep suppressing
+      // alerts for a window the user may have left long ago.
+      this.#frontmost = null
       if (!this.#disposed) this.#scheduleReconnect()
     })
   }
 
   #onFrame(msg: ServerMessage): void {
     if (msg?.t === 'state') {
+      // `?? null`: an older engine omits the key entirely, which must
+      // read as "unknown", not as a stale value from a previous broadcast.
+      this.#frontmost = msg.frontmost ?? null
       this.#emit(msg.sessions)
       return
     }
@@ -174,7 +184,7 @@ export class EngineClient {
   #emit(sessions: SessionState[]): void {
     for (const cb of this.#listeners) {
       try {
-        cb(sessions)
+        cb(sessions, this.#frontmost)
       } catch (err) {
         console.error('nudge client: onState listener threw', err)
       }

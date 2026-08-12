@@ -24,7 +24,16 @@ export type ClientMessage =
 export type ServerMessage =
   | { t: 'ok'; id: number; data?: unknown }
   | { t: 'err'; id: number; message: string }
-  | { t: 'state'; sessions: SessionState[] }
+  /**
+   * `frontmost` is the session the user is currently looking at, as reported
+   * by an editor client via `{t:'frontmost'}`. The engine has always tracked
+   * it for its OWN suppression but never told anyone, so no client could
+   * apply the same rule — the tray's Dock bounced at you while you were
+   * looking at the very window that was waiting. Optional: an older engine
+   * omits it and clients read `null`, which is exactly the previous
+   * behaviour, and an older client ignores the extra key.
+   */
+  | { t: 'state'; sessions: SessionState[]; frontmost?: string | null }
 
 export function encode(msg: unknown): string {
   return JSON.stringify(msg) + '\n'

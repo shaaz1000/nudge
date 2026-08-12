@@ -70,16 +70,20 @@ const session = (over: Partial<SessionState> = {}): SessionState => ({
  * currently-running production engine socket.
  */
 function makeClient() {
-  let stateCb: ((s: SessionState[]) => void) | null = null
+  let stateCb: ((s: SessionState[], frontmost: string | null) => void) | null = null
   const sent: ClientMessage[] = []
   const client = {
     connected: true,
-    onState: (cb: (s: SessionState[]) => void) => { stateCb = cb },
+    onState: (cb: (s: SessionState[], frontmost: string | null) => void) => { stateCb = cb },
     send: (msg: ClientMessage) => { sent.push(msg) },
     connect: vi.fn(),
     dispose: vi.fn(),
   }
-  return { client: client as EngineClientLike & typeof client, sent, emit: (s: SessionState[]) => stateCb?.(s) }
+  return {
+    client: client as EngineClientLike & typeof client,
+    sent,
+    emit: (s: SessionState[], frontmost: string | null = null) => stateCb?.(s, frontmost),
+  }
 }
 
 function makeTray() {
@@ -102,9 +106,10 @@ function makeTray() {
  */
 function makeNotifier() {
   const updates: SessionState[][] = []
+  const frontmosts: Array<string | null | undefined> = []
   const dispose = vi.fn()
   const notifier: NotifierLike = {
-    update: sessions => { updates.push(sessions) },
+    update: (sessions, frontmost) => { updates.push(sessions); frontmosts.push(frontmost) },
     dispose,
   }
   let capturedOnFocus: ((s: SessionState) => void) | null = null
@@ -112,7 +117,7 @@ function makeNotifier() {
     capturedOnFocus = onFocus
     return notifier
   })
-  return { notifier, updates, dispose, createNotifier, fireOnFocus: (s: SessionState) => capturedOnFocus?.(s) }
+  return { notifier, updates, frontmosts, dispose, createNotifier, fireOnFocus: (s: SessionState) => capturedOnFocus?.(s) }
 }
 
 /**
@@ -122,12 +127,13 @@ function makeNotifier() {
  */
 function makeAttention() {
   const updates: SessionState[][] = []
+  const frontmosts: Array<string | null | undefined> = []
   const dispose = vi.fn()
   const attention: AttentionLike = {
-    update: sessions => { updates.push(sessions) },
+    update: (sessions, frontmost) => { updates.push(sessions); frontmosts.push(frontmost) },
     dispose,
   }
-  return { attention, updates, dispose, createAttention: vi.fn(() => attention) }
+  return { attention, updates, frontmosts, dispose, createAttention: vi.fn(() => attention) }
 }
 
 /** A fully controllable fake AppSurface — every test injects one explicitly. */
@@ -580,5 +586,62 @@ describe('main: attention wiring (Task 7)', () => {
     await new Promise(r => setTimeout(r, 20))
 
     expect(createAttention).not.toHaveBeenCalled()
+  })
+})
+
+describe('main: frontmost suppression reaches the alerts', () => {
+  /**
+   * The engine has always tracked which session the user is looking at, but
+   * kept it private — so the Dock bounced at you while you were looking at
+   * the very window that was waiting. It now rides on the state broadcast;
+   * this proves main.ts actually hands it to BOTH consumers rather than
+   * dropping it on the floor, which is what it did before.
+   */
+  it('passes the broadcast frontmost through to the attention manager', async () => {
+    const { surface, resolveReady } = makeSurface()
+    const { client, emit } = makeClient()
+    const { tray } = makeTray()
+    const { createNotifier } = makeNotifier()
+    const { createAttention, frontmosts } = makeAttention()
+
+    main({ appSurface: surface, client, createTray: () => tray, createNotifier, createAttention, focusSession: vi.fn() })
+    resolveReady()
+    await new Promise(r => setTimeout(r, 0))
+
+    emit([session({ tier: 'blocked' })], 's1')
+
+    expect(frontmosts.at(-1)).toBe('s1')
+  })
+
+  it('passes it to the notifier too — a banner for the window you are in is the same noise', async () => {
+    const { surface, resolveReady } = makeSurface()
+    const { client, emit } = makeClient()
+    const { tray } = makeTray()
+    const { createNotifier, frontmosts } = makeNotifier()
+    const { createAttention } = makeAttention()
+
+    main({ appSurface: surface, client, createTray: () => tray, createNotifier, createAttention, focusSession: vi.fn() })
+    resolveReady()
+    await new Promise(r => setTimeout(r, 0))
+
+    emit([session({ tier: 'blocked' })], 's1')
+
+    expect(frontmosts.at(-1)).toBe('s1')
+  })
+
+  it('carries null through unchanged when nothing is focused', async () => {
+    const { surface, resolveReady } = makeSurface()
+    const { client, emit } = makeClient()
+    const { tray } = makeTray()
+    const { createNotifier } = makeNotifier()
+    const { createAttention, frontmosts } = makeAttention()
+
+    main({ appSurface: surface, client, createTray: () => tray, createNotifier, createAttention, focusSession: vi.fn() })
+    resolveReady()
+    await new Promise(r => setTimeout(r, 0))
+
+    emit([session({ tier: 'blocked' })], null)
+
+    expect(frontmosts.at(-1)).toBeNull()
   })
 })

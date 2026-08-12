@@ -341,12 +341,11 @@ export class AttentionManager {
   }
 
   /**
-   * `frontmostSessionId` defaults to null because nothing currently feeds it:
-   * the engine tracks frontmost privately (engine.ts's `#frontmost`, fed by
-   * the VS Code extension) and does not include it in its state broadcast, so
-   * a tray client has no way to observe it. The suppression rule is
-   * implemented and tested here so that closing that gap is a wiring change
-   * rather than a behaviour change — see the Task 7 report.
+   * `frontmostSessionId` is the session the user is currently looking at, as
+   * reported by an editor client and now carried on the engine's state
+   * broadcast. It defaults to null so a client that cannot observe it (or an
+   * older engine that does not send it) simply never suppresses on this
+   * ground, which is the previous behaviour.
    */
   update(sessions: SessionState[], frontmostSessionId: string | null = null): void {
     if (this.#disposed) return

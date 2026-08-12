@@ -333,3 +333,40 @@ describe('Notifier: suppression — the tray is the ONLY banner source while it 
     expect(created[0]?.close).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('Notifier: the frontmost session (whole-branch review follow-up)', () => {
+  const cfg2 = (): NudgeConfig => structuredClone(DEFAULT_CONFIG)
+
+  it('raises no banner for the session the user is already looking at', () => {
+    const { surface, created } = makeSurface()
+    const notifier = new Notifier(vi.fn(), surface, { loadConfig: cfg2, now: () => 100 })
+
+    notifier.update([session({ sessionId: 's1', tier: 'blocked' })], 's1')
+
+    expect(created).toHaveLength(0)
+  })
+
+  it('still notifies for a DIFFERENT session while one is focused', () => {
+    const { surface, created } = makeSurface()
+    const notifier = new Notifier(vi.fn(), surface, { loadConfig: cfg2, now: () => 100 })
+
+    notifier.update([
+      session({ sessionId: 's1', tier: 'blocked' }),
+      session({ sessionId: 's2', tier: 'blocked' }),
+    ], 's1')
+
+    expect(created).toHaveLength(1)
+  })
+
+  it('notifies once focus moves away while the wait is still open', () => {
+    const { surface, created } = makeSurface()
+    const notifier = new Notifier(vi.fn(), surface, { loadConfig: cfg2, now: () => 100 })
+
+    notifier.update([session({ sessionId: 's1', tier: 'blocked' })], 's1')
+    expect(created).toHaveLength(0)
+
+    notifier.update([session({ sessionId: 's1', tier: 'blocked' })], null)
+
+    expect(created).toHaveLength(1)
+  })
+})

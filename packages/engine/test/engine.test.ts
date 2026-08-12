@@ -16,6 +16,8 @@ import { encode } from '@nudge/shared/protocol'
 import type { HookName, NudgeEvent, SessionState } from '@nudge/shared/types'
 import type { NudgeConfig } from '@nudge/shared/config'
 
+let broadcastSeq = 0
+
 let dir: string, clock: FakeClock, db: Db, engine: Engine
 let local: string[], phone: string[]
 /**
@@ -740,5 +742,75 @@ describe('malformed optional fields never reach the store (I10)', () => {
     } finally {
       await server.close()
     }
+  })
+})
+
+describe('Engine.setFrontmost', () => {
+  /**
+   * The suppression rule existed in the engine but no client could apply it,
+   * because frontmost never left the process. Two things must be true for a
+   * client to honour it: the value has to be ON the broadcast (server.test)
+   * and a focus CHANGE has to produce a broadcast of its own — a session can
+   * sit blocked for minutes with no state change at all, which is exactly
+   * when the user tabs into the waiting window.
+   */
+  function build() {
+    const broadcasts: Array<{ frontmost: string | null }> = []
+    const c = mergeConfig({}) as NudgeConfig
+    const fclock = new FakeClock(0)
+    const fdb = new Db(join(dir, `frontmost-${broadcastSeq++}.db`))
+    const store = new SessionStore(c, fclock)
+    const server = {
+      broadcast: (_sessions: SessionState[], frontmost: string | null = null) => {
+        broadcasts.push({ frontmost })
+      },
+      hasGuiClient: () => false,
+    }
+    let eng!: Engine
+    const dispatcher = new Dispatcher(c, fclock, async () => ({
+      id: 'test', configSchema: {}, send: async () => {},
+    }))
+    const escalator = new Escalator({
+      cfg: c, clock: fclock, idleMs: () => 0,
+      onLocal: (sess, t) => eng.onLocal(sess, t),
+      onPhone: (sess, t) => { void eng.onPhone(sess, t) },
+    })
+    eng = new Engine({
+      cfg: c, clock: fclock, store, db: fdb, escalator, dispatcher,
+      notifier: { alert: () => {}, alertSound: () => {} } as never,
+      watchdog: new Watchdog(c, fclock, store, t => eng.onWatchdogStall(t)),
+      server: server as never,
+    })
+    return { eng, broadcasts, fdb }
+  }
+
+  it('broadcasts on a focus change so clients learn without waiting for a hook event', () => {
+    const { eng, broadcasts, fdb } = build()
+    try {
+      eng.setFrontmost('s1')
+      expect(broadcasts.at(-1)).toMatchObject({ frontmost: 's1' })
+    } finally { fdb.close() }
+  })
+
+  it('broadcasts the clear when focus leaves', () => {
+    const { eng, broadcasts, fdb } = build()
+    try {
+      eng.setFrontmost('s1')
+      eng.setFrontmost(null)
+      expect(broadcasts.at(-1)).toMatchObject({ frontmost: null })
+    } finally { fdb.close() }
+  })
+
+  it('does NOT re-broadcast when the value has not changed', () => {
+    const { eng, broadcasts, fdb } = build()
+    try {
+      eng.setFrontmost('s1')
+      const after = broadcasts.length
+      eng.setFrontmost('s1')
+      eng.setFrontmost('s1')
+      // Window-focus events fire constantly; re-broadcasting each one would
+      // put a config read and a full render on every client for no change.
+      expect(broadcasts).toHaveLength(after)
+    } finally { fdb.close() }
   })
 })

@@ -192,8 +192,8 @@ export class EngineServer {
     }
   }
 
-  broadcast(sessions: SessionState[]): void {
-    const payload = encode({ t: 'state', sessions })
+  broadcast(sessions: SessionState[], frontmost: string | null = null): void {
+    const payload = encode({ t: 'state', sessions, frontmost })
     for (const sock of this.#subscribers) {
       // Belt-and-braces here too: write() on a destroyed socket returns
       // false rather than throwing. Real eviction happens via #attach's

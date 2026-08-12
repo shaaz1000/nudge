@@ -403,4 +403,68 @@ describe('EngineClient', () => {
     expect(connectionCount).toBe(1)
     expect(client.connected).toBe(false)
   })
+
+  describe('frontmost on the state broadcast', () => {
+    it('hands frontmost to every onState listener alongside the sessions', async () => {
+      const entry = stubEngine()
+      await listen(entry, sockPath)
+      const c = makeClient({})
+      const seen: Array<string | null> = []
+      c.onState((_s, frontmost) => { seen.push(frontmost) })
+      c.connect()
+      await vi.waitFor(() => expect(c.connected).toBe(true))
+
+      for (const sock of entry.sockets) {
+        sock.write(encode({ t: 'state', sessions: [], frontmost: 'sess-9' }))
+      }
+      // The initial `list` snapshot emits first (with no frontmost), so wait
+      // for the state frame itself rather than for "any emit".
+      await vi.waitFor(() => expect(seen.at(-1)).toBe('sess-9'))
+      c.dispose()
+    })
+
+    it('reads null when an OLDER engine omits the key entirely', async () => {
+      // Forward compatibility both ways: a client built after this change
+      // must not treat a missing key as a stale previous value.
+      const entry = stubEngine()
+      await listen(entry, sockPath)
+      const c = makeClient({})
+      const seen: Array<string | null> = []
+      c.onState((_s, frontmost) => { seen.push(frontmost) })
+      c.connect()
+      await vi.waitFor(() => expect(c.connected).toBe(true))
+
+      for (const sock of entry.sockets) {
+        sock.write(encode({ t: 'state', sessions: [], frontmost: 'sess-9' }))
+      }
+      await vi.waitFor(() => expect(seen.at(-1)).toBe('sess-9'))
+      for (const sock of entry.sockets) {
+        sock.write(encode({ t: 'state', sessions: [] })) // no frontmost key
+      }
+
+      await vi.waitFor(() => expect(seen.at(-1)).toBeNull())
+      c.dispose()
+    })
+
+    it('forgets frontmost when the engine goes away', async () => {
+      // A remembered value from a dead engine would keep suppressing alerts
+      // for a window the user may have left long ago.
+      const entry = stubEngine()
+      await listen(entry, sockPath)
+      const c = makeClient({ initialBackoffMs: 10_000 })
+      c.onState(() => {})
+      c.connect()
+      await vi.waitFor(() => expect(c.connected).toBe(true))
+      for (const sock of entry.sockets) {
+        sock.write(encode({ t: 'state', sessions: [], frontmost: 'sess-9' }))
+      }
+      await vi.waitFor(() => expect(c.frontmost).toBe('sess-9'))
+
+      for (const sock of entry.sockets) sock.destroy()
+      await vi.waitFor(() => expect(c.connected).toBe(false))
+
+      expect(c.frontmost).toBeNull()
+      c.dispose()
+    })
+  })
 })
