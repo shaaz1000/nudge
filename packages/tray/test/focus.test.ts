@@ -35,6 +35,7 @@ const session = (surface: Surface, over: Partial<SessionState> = {}): SessionSta
 const HOSTILE = `plain" $(rm -rf /) \`whoami\` ; echo pwned's\r\nStart-Process calc.exe #\\`
 
 const noCommands = () => false
+const allCommands = () => true
 
 // ---------------------------------------------------------------------------
 // Escaping — the exact category of bug Phase 1 shipped (one escaper written
@@ -105,23 +106,23 @@ describe('escaper distinctness — reusing one across platforms is the exact Pha
 // ---------------------------------------------------------------------------
 describe('buildFocusPlan: VS Code / Cursor / Windsurf', () => {
   it('vscode: spawns `code <cwd>`', () => {
-    const plan = buildFocusPlan(session({ kind: 'vscode' }, { cwd: '/x/proj' }), 'darwin', noCommands)
+    const plan = buildFocusPlan(session({ kind: 'vscode' }, { cwd: '/x/proj' }), 'darwin', allCommands)
     expect(plan).toEqual({ kind: 'spawn', cmd: 'code', args: ['/x/proj'] })
   })
 
   it('cursor: spawns `cursor <cwd>`', () => {
-    const plan = buildFocusPlan(session({ kind: 'cursor' }, { cwd: '/x/proj' }), 'darwin', noCommands)
+    const plan = buildFocusPlan(session({ kind: 'cursor' }, { cwd: '/x/proj' }), 'darwin', allCommands)
     expect(plan).toEqual({ kind: 'spawn', cmd: 'cursor', args: ['/x/proj'] })
   })
 
   it('windsurf: spawns `windsurf <cwd>`', () => {
-    const plan = buildFocusPlan(session({ kind: 'windsurf' }, { cwd: '/x/proj' }), 'darwin', noCommands)
+    const plan = buildFocusPlan(session({ kind: 'windsurf' }, { cwd: '/x/proj' }), 'darwin', allCommands)
     expect(plan).toEqual({ kind: 'spawn', cmd: 'windsurf', args: ['/x/proj'] })
   })
 
   it('a cwd containing shell metacharacters is passed through as ONE literal argv element — argv, not a shell string, carries it, so there is nothing to escape', () => {
     const hostileCwd = `/x/${HOSTILE}`
-    const plan = buildFocusPlan(session({ kind: 'vscode' }, { cwd: hostileCwd }), 'darwin', noCommands)
+    const plan = buildFocusPlan(session({ kind: 'vscode' }, { cwd: hostileCwd }), 'darwin', allCommands)
     expect(plan).toEqual({ kind: 'spawn', cmd: 'code', args: [hostileCwd] })
   })
 })
@@ -479,5 +480,57 @@ describe('focusSession: never resolves the wait', () => {
     await focusSession(session({ kind: 'unknown' }), { spawner, clipboard, notify: vi.fn(), platform: 'darwin' })
     for (const call of calls) expect(JSON.stringify(call)).not.toContain('resolve')
     for (const text of written) expect(text).not.toContain('resolve')
+  })
+})
+
+describe('buildFocusPlan: the editor CLI may simply not be installed', () => {
+  /**
+   * Whole-branch review, Important 7. On macOS the `code` CLI is absent from
+   * PATH until the user runs "Shell Command: Install 'code' command in PATH";
+   * on Windows it is `code.cmd`, which Node's spawn will not run without a
+   * shell. Either way the spawn failed into a swallowed 'error' handler, so
+   * clicking the notification — the headline interaction of this phase — did
+   * nothing at all: no window, no clipboard copy, no message.
+   */
+  for (const kind of ['vscode', 'cursor', 'windsurf'] as const) {
+    it(`${kind}: falls back to the clipboard when the CLI is not on PATH, instead of failing silently`, () => {
+      const plan = buildFocusPlan(session({ kind }, { cwd: '/x/proj' }), 'darwin', noCommands)
+      expect(plan.kind).toBe('clipboard')
+      if (plan.kind === 'clipboard') {
+        expect(plan.text).toBe('/x/proj')
+        expect(plan.reason).toMatch(/could not find/i)
+      }
+    })
+  }
+
+  it('still spawns when the CLI IS present — the fallback must not swallow the working path', () => {
+    const plan = buildFocusPlan(session({ kind: 'vscode' }, { cwd: '/x/proj' }), 'darwin', allCommands)
+    expect(plan).toEqual({ kind: 'spawn', cmd: 'code', args: ['/x/proj'] })
+  })
+})
+
+describe('escapeAppleScriptString: control characters (whole-branch review, Important 9)', () => {
+  // A raw newline inside an AppleScript "..." literal is a COMPILE error that
+  // kills the whole script — so the focus AND its clipboard fallback both die
+  // silently, since the fallback lives in the same script. `cwd` and `project`
+  // flow into these literals and a POSIX path may legally contain a newline.
+  it('escapes a newline rather than emitting a literal that cannot compile', () => {
+    const out = escapeAppleScriptString('a\nb')
+    expect(out).not.toMatch(/\n/)
+    expect(out).toBe('a\\nb')
+  })
+
+  it('escapes a carriage return', () => {
+    expect(escapeAppleScriptString('a\rb')).toBe('a\\rb')
+  })
+
+  it('emits no raw control character for a hostile path', () => {
+    const out = escapeAppleScriptString('/tmp/a\r\nb\u0007c\u0000d')
+    // eslint-disable-next-line no-control-regex
+    expect(out).not.toMatch(/[\u0000-\u001f\u007f]/)
+  })
+
+  it('still escapes quotes and backslashes, in the right order', () => {
+    expect(escapeAppleScriptString('a\\"b')).toBe('a\\\\\\"b')
   })
 })

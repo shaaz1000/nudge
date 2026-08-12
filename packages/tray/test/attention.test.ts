@@ -120,9 +120,15 @@ function makeDockSurface() {
 /** A fully controllable fake FlashSurface (Windows/Linux taskbar path) — no dock at all. */
 function makeFlashSurface() {
   const flash = vi.fn()
-  const flashWindow: FlashSurface = { flash }
+  // `dispose` is defined because the REAL lazyFlashWindow() always provides
+  // one and AttentionManager.dispose() calls it. Without it here the fake
+  // could not observe the call, so deleting that line left every test green
+  // while Windows/Linux quitting mid-wait leaked a live 1x1 window with its
+  // taskbar button still flashing — which can also stop the process exiting.
+  const dispose = vi.fn()
+  const flashWindow: FlashSurface = { flash, dispose }
   const surface: AttentionSurface = { platform: 'win32', dock: null, flashWindow }
-  return { surface, flash }
+  return { surface, flash, dispose }
 }
 
 describe('DEFAULT_BOUNCE_TIERS: tiers that escalate under DEFAULT_CONFIG', () => {
@@ -982,13 +988,32 @@ describe('defaultSurface: the hidden-Dock baseline (review finding 3)', () => {
     expect(dock.cancelBounce).toHaveBeenCalledWith(3)
   })
 
-  it('a rejected dock.show() is caught, not left as an unhandled rejection in the main process', async () => {
+  it('surfaces the show() promise so AttentionManager can await it, rather than swallowing it', () => {
     const dock = fakeDock()
-    dock.show = vi.fn(async () => { throw new Error('dock unavailable') })
     const s = defaultSurface({ platform: 'darwin', dock })
 
-    expect(() => s.dock?.show()).not.toThrow()
-    await new Promise(r => setTimeout(r, 0))
+    // Load-bearing: if this wrapper swallowed the promise (returning void),
+    // AttentionManager would take its SYNCHRONOUS branch and bounce before
+    // the Dock icon exists — the race this whole path was rewritten to fix.
+    // `not.toThrow()` on an async function proves nothing; the promise itself
+    // is the contract.
+    const returned = s.dock?.show()
+    expect(returned).toBeInstanceOf(Promise)
+    return returned
+  })
+
+  it('a rejected dock.show() is handled by AttentionManager, not left unhandled', async () => {
+    const dock = fakeDock()
+    dock.show = vi.fn(async () => { throw new Error('dock unavailable') })
+    const surface = defaultSurface({ platform: 'darwin', dock })
+    const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
+
+    attn.update([session({ tier: 'blocked' })])
+    await flush()
+
+    // The rejection is caught AND the bounce still happens — a Dock that
+    // refused to show must not also cost the user the nudge.
+    expect(dock.bounce).toHaveBeenCalledWith('critical')
   })
 
   it('degrades to no persistent attention on a Mac with no dock rather than throwing', () => {
@@ -1053,5 +1078,27 @@ describe('AttentionManager: dispose', () => {
 
     expect(cancelBounce).toHaveBeenCalledTimes(1)
     expect(hide).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('AttentionManager: disposal on the flash path (Windows/Linux)', () => {
+  it('stops the flash when disposed mid-wait', () => {
+    const { surface, flash } = makeFlashSurface()
+    const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
+
+    attn.update([session({ tier: 'blocked' })])
+    attn.dispose()
+
+    expect(flash).toHaveBeenLastCalledWith(false)
+  })
+
+  it('destroys the flash window on dispose — otherwise the process may never exit', () => {
+    const { surface, dispose } = makeFlashSurface()
+    const attn = new AttentionManager(surface, DEFAULT_ATTENTION_CONFIG, { loadConfig: cfg, now: () => 100 })
+
+    attn.update([session({ tier: 'blocked' })])
+    attn.dispose()
+
+    expect(dispose).toHaveBeenCalledTimes(1)
   })
 })

@@ -156,7 +156,8 @@ export class Notifier {
   readonly #surface: NotifySurface
   readonly #loadConfig: () => NudgeConfig
   readonly #now: () => number
-  readonly #shown = new Map<string, NotificationLike>()
+  /** sessionId -> the banner on screen, plus what it was raised FOR. */
+  readonly #shown = new Map<string, { n: NotificationLike; tier: Tier; message: string | null }>()
   #lastGoodConfig: NudgeConfig | null = null
   #disposed = false
 
@@ -208,17 +209,29 @@ export class Notifier {
     // waiting, so it notifies again if it re-blocks later. Iterating and
     // deleting from the same Map is well-defined in JS — a Map iterator is
     // unaffected by deletions of entries already visited or not yet due.
-    for (const [id, n] of this.#shown) {
+    for (const [id, shown] of this.#shown) {
       if (!waitingIds.has(id)) {
-        n.close()
+        shown.n.close()
         this.#shown.delete(id)
       }
     }
 
     for (const s of mine) {
       if (!waiting(s)) continue
-      if (this.#shown.has(s.sessionId)) continue
-      this.#shown.set(s.sessionId, this.#show(s))
+      const already = this.#shown.get(s.sessionId)
+      // Re-notify when the WAIT ITSELF changed, not just when a new session
+      // appears. A session can go idle-short ("turn finished") -> blocked
+      // ("may I run this?") without ever passing through tier: null, and
+      // de-duping on sessionId alone left the user looking at a banner that
+      // said the turn had finished while Claude was actually asking them a
+      // question. Same for a message that changes mid-wait.
+      if (already && already.tier === s.tier && already.message === s.message) continue
+      if (already) already.n.close()
+      this.#shown.set(s.sessionId, {
+        n: this.#show(s),
+        tier: s.tier as Tier,
+        message: s.message,
+      })
     }
   }
 
@@ -249,7 +262,7 @@ export class Notifier {
    */
   dispose(): void {
     this.#disposed = true
-    for (const n of this.#shown.values()) n.close()
+    for (const shown of this.#shown.values()) shown.n.close()
     this.#shown.clear()
   }
 }

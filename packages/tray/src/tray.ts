@@ -153,6 +153,8 @@ export interface TrayCallbacks {
   /** "Start engine" — only ever offered while unreachable (see #menuItems). */
   onStartEngine(): void
   onOpenHistoryFolder(): void
+  /** Current mute state, read fresh each render — mute persists across restarts and other clients can change it. */
+  isMuted(): boolean
   /**
    * Current launch-at-login state, read fresh each time the menu is built so
    * the checkmark reflects what the OS actually has registered rather than
@@ -196,7 +198,6 @@ export class NudgeTray {
   readonly #callbacks: TrayCallbacks
   readonly #surface: TraySurface
   readonly #tray: TrayIconLike
-  #muted = false
   #disposed = false
   #nextId = 1
 
@@ -279,12 +280,18 @@ export class NudgeTray {
         for (const s of waiting) this.#send({ t: 'snooze', id: this.#nextId++, sessionId: s.sessionId, ms: SNOOZE_MS })
       },
     })
+    // Read live, exactly like "Start at login" below and for the same reason.
+    // This used to be a private `#muted` boolean seeded `false` on every
+    // launch: mute persists to config.json, so a freshly started tray showed
+    // "Mute" while Nudge was already muted, and clicking it sent a no-op
+    // `{on:true}` and then flipped the label — right only by luck. Muting
+    // from the CLI or another client inverted it again.
+    const muted = this.#callbacks.isMuted()
     items.push({
-      label: this.#muted ? 'Unmute' : 'Mute',
-      click: () => {
-        this.#muted = !this.#muted
-        this.#send({ t: 'mute', id: this.#nextId++, on: this.#muted })
-      },
+      type: 'checkbox',
+      label: 'Mute',
+      checked: muted,
+      click: () => { this.#send({ t: 'mute', id: this.#nextId++, on: !muted }) },
     })
     items.push({ label: 'Open history folder', click: () => this.#callbacks.onOpenHistoryFolder() })
     // Read live rather than cached: the user can also change this in the OS's

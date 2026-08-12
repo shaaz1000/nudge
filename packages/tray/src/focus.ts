@@ -46,7 +46,25 @@ import type { SessionState, Surface } from '@nudge/shared/types'
  * scope, and this is a tiny, self-contained pure function.
  */
 export function escapeAppleScriptString(s: string): string {
-  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  return s
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    // AppleScript string literals cannot span a line break: a raw CR or LF
+    // inside "…" is a COMPILE error that kills the ENTIRE script, not just
+    // one line. `osascript`'s output is discarded (`stdio: 'ignore'`), so the
+    // failure is completely silent — no window focused, and not even the
+    // clipboard fallback, because that fallback lives in the same script.
+    //
+    // Reachable without an attacker: `s.cwd` and `s.project` flow into these
+    // literals and a POSIX directory name may legally contain a newline.
+    // `\r`/`\n` are AppleScript's own escapes, so the text survives intact.
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')
+    // The remaining C0 controls have no AppleScript escape and would also
+    // break the literal; drop them rather than emit a script that cannot
+    // compile.
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
 }
 
 /**
@@ -270,12 +288,31 @@ export function buildFocusPlan(
   switch (surface.kind) {
     case 'vscode':
     case 'cursor':
-    case 'windsurf':
+    case 'windsurf': {
       // argv, not a shell string: `spawn(cmd, [s.cwd])` passes `s.cwd` as a
       // single, literal process argument. There is no shell interpreting it
       // in between, so quotes/`;`/`$(...)`/backticks inside a real folder
       // name cannot break out of anything — no escaper applies here.
-      return { kind: 'spawn', cmd: EDITOR_CLI[surface.kind], args: [s.cwd] }
+      const cli = EDITOR_CLI[surface.kind]
+      // Presence-checked like the Linux branches below, and for a more common
+      // reason than they have: on macOS the `code` CLI is absent from PATH
+      // until the user runs "Shell Command: Install 'code' command in PATH",
+      // and on Windows it is `code.cmd`, which Node's `spawn` will not
+      // execute without a shell. In both cases the spawn fails into a
+      // swallowed `'error'` event, so clicking the notification — the
+      // headline interaction of this whole phase — did nothing whatsoever:
+      // no window, no clipboard copy, no message. The clipboard fallback
+      // exists for exactly this case and was simply never reached.
+      if (!hasCommand(cli)) {
+        return clipboardFallback(
+          s,
+          `Nudge could not find the "${cli}" command, so it could not open "${s.project}" for you. `
+          + 'Run "Shell Command: Install \'code\' command in PATH" from the editor\'s command palette. '
+          + 'The folder path is on your clipboard.',
+        )
+      }
+      return { kind: 'spawn', cmd: cli, args: [s.cwd] }
+    }
     case 'desktop':
       return desktopAppPlan(surface, s, platform, hasCommand)
     case 'terminal':

@@ -20,7 +20,7 @@ describe('sendEvent', () => {
   it('delivers the payload to a listening engine', async () => {
     const sock = join(dir, 'e.sock')
     const got: string[] = []
-    server = createServer(s => { s.setEncoding('utf8'); s.on('data', d => got.push(d as string)) })
+    server = createServer(s => { s.setEncoding('utf8'); s.on('data', d => got.push(d as unknown as string)) })
     await new Promise<void>(r => server!.listen(sock, () => r()))
 
     const ok = await sendEvent('{"t":"event"}\n', 500, sock)

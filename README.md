@@ -359,6 +359,9 @@ bounce and removes the Dock icon again.
 Tune it with a `tray` section in `~/.nudge/config.json` (the engine ignores
 this key — it belongs to the tray):
 
+The comments below are illustrative — `config.json` is parsed with
+`JSON.parse`, which rejects them, so do not paste them in:
+
 ```jsonc
 {
   "tray": {
@@ -375,7 +378,12 @@ on defaults rather than refusing to boot.
 
 ```bash
 npm install                  # from the repo root, if you haven't already
-npm run bundle -w nudge-tray # esbuild -> dist/index.cjs, plus icons -> dist/assets
+npx tsc --build              # REQUIRED first: the tray bundles against
+                             # @nudge/shared and @nudge/client, whose package
+                             # entry points are their dist/ output, and dist/
+                             # is gitignored — on a fresh clone esbuild cannot
+                             # resolve them until this has run.
+npm run bundle -w nudge-tray # esbuild -> dist/index.cjs, engine, icons
 npm start -w nudge-tray      # run it straight out of the repo
 ```
 
@@ -383,17 +391,26 @@ To build an installable artefact:
 
 ```bash
 npm run pack -w nudge-tray   # unpacked .app/.exe tree in packages/tray/release/
-npm run dist -w nudge-tray   # .dmg / .exe / .AppImage
+npm run dist -w nudge-tray   # installer for the CURRENT platform
 ```
+
+`dist` builds only the host platform's target — a `.dmg` on macOS, `.exe` on
+Windows, `.AppImage` on Linux. Cross-building the Windows and Linux targets
+needs Wine/Docker and is not set up here.
 
 **The build is unsigned.** Signing macOS builds needs a paid Apple Developer
 account, which this project does not have, so Gatekeeper quarantines the
 `.dmg` and macOS reports that the app "is damaged" or "cannot be opened".
-Right-click the app → **Open** → **Open**, or clear the flag yourself:
+Clear the quarantine flag:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/Nudge.app
 ```
+
+Right-click → **Open** is the advice you will find elsewhere, and it **no
+longer works** for unsigned apps: macOS 15 removed it as a Gatekeeper bypass.
+If you would rather not use the terminal, the current path is System Settings
+→ Privacy & Security → scroll to the blocked-app notice → **Open Anyway**.
 
 That is a real cost of an unsigned build, not a formality to wave past — if
 you are not willing to do it, use the VS Code extension instead.
@@ -402,6 +419,12 @@ you are not willing to do it, use the VS Code extension instead.
 
 These are real limits, not caveats to skim past — you will hit them.
 
+- **The tray needs Electron with Node >= 22.5.** It spawns the engine under
+  Electron's own Node (`ELECTRON_RUN_AS_NODE=1`), and the engine's event log
+  uses the built-in `node:sqlite`. Electron 33 bundled Node 20, where that
+  module does not exist, so "Start engine" failed with
+  `ERR_UNKNOWN_BUILTIN_MODULE`. Pinned to Electron 43 (Node 24) for this
+  reason — do not downgrade it.
 - **The tray's Windows and Linux taskbar flash is unverified.** It was
   written and tested on macOS, where that code path never runs. The call
   sequence is asserted in tests; no real Windows taskbar has been observed

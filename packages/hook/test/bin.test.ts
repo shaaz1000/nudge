@@ -40,7 +40,7 @@ afterEach(async () => {
 describe('hook binary contract', () => {
   it('exits 0 and writes nothing to stdout when the engine is listening', async () => {
     const got: string[] = []
-    server = createServer(s => { s.setEncoding('utf8'); s.on('data', d => got.push(d as string)) })
+    server = createServer(s => { s.setEncoding('utf8'); s.on('data', d => got.push(d as unknown as string)) })
     await new Promise<void>(r => server!.listen(join(home, 'engine.sock'), () => r()))
 
     const { stdout } = await invoke({ NUDGE_NO_SPAWN: '1' })

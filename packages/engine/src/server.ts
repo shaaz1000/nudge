@@ -155,11 +155,19 @@ export class EngineServer {
         case 'frontmost': this.h.onFrontmost(m.sessionId); return
         case 'ping':     this.#reply(sock, { t: 'ok', id: m.id }); return
         case 'list':     this.#reply(sock, { t: 'ok', id: m.id, data: this.h.onList() }); return
-        case 'subscribe':
+        case 'subscribe': {
           this.#subscribers.add(sock)
-          if (m.gui) this.#guiSubscribers.add(sock)
+          // Symmetric: a re-subscribe WITHOUT `gui` un-declares, and if that
+          // was the last GUI client the engine must resume its own banner —
+          // otherwise it stays suppressed forever with nothing showing one.
+          if (m.gui) {
+            this.#guiSubscribers.add(sock)
+          } else if (this.#guiSubscribers.delete(sock) && this.#guiSubscribers.size === 0) {
+            this.h.onGuiDisconnected?.()
+          }
           this.#reply(sock, { t: 'ok', id: m.id })
           return
+        }
         case 'snooze':
           this.h.onSnooze(m.sessionId, m.ms)
           this.#reply(sock, { t: 'ok', id: m.id })
@@ -190,7 +198,17 @@ export class EngineServer {
       // Belt-and-braces here too: write() on a destroyed socket returns
       // false rather than throwing. Real eviction happens via #attach's
       // close/error listeners; this catch only guards a synchronous throw.
-      try { sock.write(payload) } catch { this.#subscribers.delete(sock) }
+      // Evict from BOTH sets. Dropping only #subscribers is how
+      // hasGuiClient() gets stuck true for a socket that is already gone,
+      // which silences the engine's own banner permanently.
+      try {
+        sock.write(payload)
+      } catch {
+        this.#subscribers.delete(sock)
+        if (this.#guiSubscribers.delete(sock) && this.#guiSubscribers.size === 0) {
+          this.h.onGuiDisconnected?.()
+        }
+      }
     }
   }
 

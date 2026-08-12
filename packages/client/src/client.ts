@@ -115,7 +115,10 @@ export class EngineClient {
     sock.on('connect', () => {
       this.#connected = true
       this.#backoffMs = this.#initialBackoffMs
-      this.send({ t: 'subscribe', id: this.#nextId++, gui: this.#gui })
+      // Spread rather than always emitting the key: a non-GUI client's
+      // subscribe stays byte-identical to what it sent before `gui`
+      // existed, so the extraction changes nothing on the wire for it.
+      this.send({ t: 'subscribe', id: this.#nextId++, ...(this.#gui ? { gui: true } : {}) })
       // Finding I1: `subscribe` alone only arms future broadcasts. Asking
       // for `list` right behind it fills in whatever the engine is already
       // holding — the fix for a client that connects (or reconnects) into a

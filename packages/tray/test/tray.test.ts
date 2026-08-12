@@ -74,7 +74,10 @@ describe('formatWaitDuration', () => {
 
 /** Records every image load, tooltip/title/menu set on a fake tray icon. */
 function makeSurface() {
-  const icon: TrayIconLike = {
+  // NOT annotated `: TrayIconLike` — that widens each vi.fn() to its plain
+  // signature and hides `.mock`/`.mockClear` from the tests below. The
+  // `satisfies` at the end still proves this fake implements the interface.
+  const icon = {
     setImage: vi.fn(),
     setToolTip: vi.fn(),
     setTitle: vi.fn(),
@@ -90,13 +93,13 @@ function makeSurface() {
       loadedImages.push({ path, template })
       return { __img: path }
     },
-    createTray: () => icon,
+    createTray: () => icon satisfies TrayIconLike,
     buildMenu: items => { builtMenus.push(items); return { __menu: items } },
   }
   return { surface, icon, loadedImages, builtMenus, lastMenu: () => builtMenus[builtMenus.length - 1] }
 }
 
-function makeCallbacks(opts: { atLogin?: boolean } = {}) {
+function makeCallbacks(opts: { atLogin?: boolean; muted?: boolean } = {}) {
   const onFocusSession = vi.fn()
   const onStartEngine = vi.fn()
   const onOpenHistoryFolder = vi.fn()
@@ -106,14 +109,17 @@ function makeCallbacks(opts: { atLogin?: boolean } = {}) {
   let atLogin = opts.atLogin ?? false
   const isLaunchAtLogin = vi.fn(() => atLogin)
   const onToggleLaunchAtLogin = vi.fn((on: boolean) => { atLogin = on })
+  let muted = opts.muted ?? false
+  const isMuted = vi.fn(() => muted)
   const callbacks: TrayCallbacks = {
     onFocusSession, onStartEngine, onOpenHistoryFolder,
-    isLaunchAtLogin, onToggleLaunchAtLogin, onQuit,
+    isMuted, isLaunchAtLogin, onToggleLaunchAtLogin, onQuit,
   }
   return {
     callbacks, onFocusSession, onStartEngine, onOpenHistoryFolder, onQuit,
-    isLaunchAtLogin, onToggleLaunchAtLogin,
+    isLaunchAtLogin, onToggleLaunchAtLogin, isMuted,
     setAtLogin: (on: boolean) => { atLogin = on },
+    setMuted: (on: boolean) => { muted = on },
   }
 }
 
@@ -291,19 +297,26 @@ describe('NudgeTray: Snooze 10m', () => {
 })
 
 describe('NudgeTray: Mute/Unmute', () => {
-  it('toggles label and the {t:"mute", on} value sent on each click', () => {
-    const sent: ClientMessage[] = []
+  it('reflects the LIVE mute state and sends the opposite on click', () => {
     const { surface, lastMenu } = makeSurface()
-    const { callbacks } = makeCallbacks()
+    const sent: ClientMessage[] = []
+    const { callbacks, setMuted } = makeCallbacks({ muted: false })
     const tray = new NudgeTray(msg => sent.push(msg), callbacks, surface)
 
     tray.render([], true)
+    expect(findItem(lastMenu(), 'Mute')).toMatchObject({ checked: false })
     findItem(lastMenu(), 'Mute').click?.()
-    expect(sent).toContainEqual(expect.objectContaining({ t: 'mute', on: true }))
+    expect(sent.at(-1)).toMatchObject({ t: 'mute', on: true })
 
-    tray.render([], true) // re-render to rebuild the menu with the new toggle state
-    findItem(lastMenu(), 'Unmute').click?.()
-    expect(sent).toContainEqual(expect.objectContaining({ t: 'mute', on: false }))
+    // Load-bearing: mute persists across restarts and other clients can set
+    // it, so the menu must read the live value rather than a private boolean
+    // seeded false at construction. A cached flag shows "not muted" on every
+    // launch and sends a no-op {on:true} when clicked.
+    setMuted(true)
+    tray.render([], true)
+    expect(findItem(lastMenu(), 'Mute')).toMatchObject({ checked: true })
+    findItem(lastMenu(), 'Mute').click?.()
+    expect(sent.at(-1)).toMatchObject({ t: 'mute', on: false })
   })
 })
 
@@ -422,8 +435,11 @@ describe('icon assets exist on disk (packaging guard)', () => {
    * blank menu-bar icon in the built app. Phase 2 shipped exactly that class
    * of defect: 84 green tests and a `.vsix` that would not load.
    *
-   * Asserts against the SOURCE assets (what is committed). The build output
-   * is covered separately by the `copy-assets` guard below.
+   * Asserts against the SOURCE assets (what is committed). The BUILD OUTPUT
+   * — which is what production actually loads (`dist/assets`) — cannot be
+   * checked from here, because vitest runs against `src/`. That half is
+   * covered by CI running `npm run bundle -w nudge-tray` and asserting the
+   * icons landed in `dist/assets`; see .github/workflows/ci.yml.
    */
   const SRC_ASSETS = fileURLToPath(new URL('../src/assets', import.meta.url))
 

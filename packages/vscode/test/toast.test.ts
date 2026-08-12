@@ -213,7 +213,7 @@ describe('Toaster', () => {
     const messages: string[] = []
     const surface: ToastSurface = {
       showWarningMessage: (message: string) => { messages.push(message); return Promise.resolve(undefined) },
-      getConfiguration: () => ({ get: (_key: string, def: boolean) => showToasts ?? def }),
+      getConfiguration: () => ({ get: <T,>(_key: string, def: T): T => (showToasts ?? def) as T }),
       executeCommand: vi.fn(),
     }
     const toaster = new Toaster(vi.fn(), surface)

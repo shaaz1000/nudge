@@ -13,14 +13,34 @@ vi.mock('electron', () => ({
     quit: vi.fn(),
     whenReady: vi.fn(() => Promise.resolve()),
     on: vi.fn(),
+    isPackaged: false,
+    getLoginItemSettings: vi.fn(() => ({ openAtLogin: false })),
+    setLoginItemSettings: vi.fn(),
+    // Present so that a test which FORGETS to inject `createAttention` drives
+    // this fake loudly rather than silently degrading. It used to be absent,
+    // which made `defaultSurface()` read `app.dock === undefined` and return
+    // {dock:null} — so 12 of the 17 main() calls in this file were quietly
+    // constructing a REAL AttentionManager against the developer's own
+    // ~/.nudge/config.json, and would have driven the real Dock in an
+    // Electron host.
+    dock: {
+      show: vi.fn(async () => {}),
+      hide: vi.fn(),
+      bounce: vi.fn(() => 0),
+      cancelBounce: vi.fn(),
+    },
   },
+  BrowserWindow: vi.fn(),
   shell: { openPath: vi.fn() },
   // main.ts statically imports notify.ts/focus.ts (for their real, default
   // production wiring), and both of those import `Notification`/`clipboard`
   // from 'electron' at module load — so this mock must provide them even
   // though every test below injects its own fake createNotifier/
   // focusSession and never lets the real defaults run.
-  Notification: vi.fn(),
+  // `isSupported` is a STATIC on the real Notification class, and main.ts
+  // now calls it to decide whether to promise the engine `gui: true` —
+  // a promise the engine honours by standing its own banner down.
+  Notification: Object.assign(vi.fn(), { isSupported: () => true }),
   clipboard: { writeText: vi.fn() },
 }))
 
@@ -157,7 +177,7 @@ describe('main: single-instance lock', () => {
     const createTray = vi.fn(() => tray)
     const { createNotifier } = makeNotifier()
 
-    main({ appSurface: surface, client, createTray, createNotifier, focusSession: vi.fn() })
+    main({ appSurface: surface, client, createTray, createNotifier, createAttention: makeAttention().createAttention, focusSession: vi.fn() })
     // Give any wrongly-reached whenReady().then(...) a chance to run —
     // without this await, a buggy version that removed the guard could
     // still pass this test by coincidence (the .then() callback hadn't run
@@ -177,7 +197,7 @@ describe('main: single-instance lock', () => {
     const createTray = vi.fn(() => tray)
     const { createNotifier } = makeNotifier()
 
-    main({ appSurface: surface, client, createTray, createNotifier, focusSession: vi.fn() })
+    main({ appSurface: surface, client, createTray, createNotifier, createAttention: makeAttention().createAttention, focusSession: vi.fn() })
     resolveReady()
     await new Promise(r => setTimeout(r, 0))
 
@@ -194,7 +214,7 @@ describe('main: wiring', () => {
     const { tray, renders } = makeTray()
     const { createNotifier } = makeNotifier()
 
-    main({ appSurface: surface, client, createTray: () => tray, createNotifier, focusSession: vi.fn() })
+    main({ appSurface: surface, client, createTray: () => tray, createNotifier, createAttention: makeAttention().createAttention, focusSession: vi.fn() })
     resolveReady()
     await new Promise(r => setTimeout(r, 0))
 
@@ -215,7 +235,7 @@ describe('main: wiring', () => {
     const { tray } = makeTray()
     const { createNotifier } = makeNotifier()
 
-    main({ appSurface: surface, client, createTray: () => tray, createNotifier, focusSession: vi.fn() })
+    main({ appSurface: surface, client, createTray: () => tray, createNotifier, createAttention: makeAttention().createAttention, focusSession: vi.fn() })
     resolveReady()
     await new Promise(r => setTimeout(r, 0))
 
@@ -230,7 +250,7 @@ describe('main: notifier wiring (Task 4)', () => {
     const { tray } = makeTray()
     const { createNotifier, updates } = makeNotifier()
 
-    main({ appSurface: surface, client, createTray: () => tray, createNotifier, focusSession: vi.fn() })
+    main({ appSurface: surface, client, createTray: () => tray, createNotifier, createAttention: makeAttention().createAttention, focusSession: vi.fn() })
     resolveReady()
     await new Promise(r => setTimeout(r, 0))
 
@@ -255,7 +275,7 @@ describe('main: notifier wiring (Task 4)', () => {
     const { createNotifier, fireOnFocus } = makeNotifier()
     const focusSpy = vi.fn()
 
-    main({ appSurface: surface, client, createTray: () => tray, createNotifier, focusSession: focusSpy })
+    main({ appSurface: surface, client, createTray: () => tray, createNotifier, createAttention: makeAttention().createAttention, focusSession: focusSpy })
     resolveReady()
     await new Promise(r => setTimeout(r, 0))
 
@@ -278,7 +298,7 @@ describe('main: notifier wiring (Task 4)', () => {
       return tray
     })
 
-    main({ appSurface: surface, client, createTray, createNotifier, focusSession: focusSpy })
+    main({ appSurface: surface, client, createTray, createNotifier, createAttention: makeAttention().createAttention, focusSession: focusSpy })
     resolveReady()
     await new Promise(r => setTimeout(r, 0))
 
@@ -307,7 +327,7 @@ describe('main: connectivity poll', () => {
       const { tray, renders } = makeTray()
       const { createNotifier } = makeNotifier()
 
-      main({ appSurface: surface, client, createTray: () => tray, createNotifier, focusSession: vi.fn(), pollIntervalMs: 10 })
+      main({ appSurface: surface, client, createTray: () => tray, createNotifier, createAttention: makeAttention().createAttention, focusSession: vi.fn(), pollIntervalMs: 10 })
       resolveReady()
       await vi.advanceTimersByTimeAsync(0)
       emit([session({ cwd: '/a/my-repo' })])
@@ -329,7 +349,7 @@ describe('main: connectivity poll', () => {
     const { tray } = makeTray()
     const { createNotifier } = makeNotifier()
 
-    main({ appSurface: surface, client, createTray: () => tray, createNotifier, focusSession: vi.fn(), pollIntervalMs: 10 })
+    main({ appSurface: surface, client, createTray: () => tray, createNotifier, createAttention: makeAttention().createAttention, focusSession: vi.fn(), pollIntervalMs: 10 })
     resolveReady()
     await new Promise(r => setTimeout(r, 0))
     const callsBefore = clearSpy.mock.calls.length
@@ -351,7 +371,7 @@ describe('main: before-quit disposal', () => {
     const { tray, dispose } = makeTray()
     const { createNotifier, dispose: notifierDispose } = makeNotifier()
 
-    main({ appSurface: surface, client, createTray: () => tray, createNotifier, focusSession: vi.fn() })
+    main({ appSurface: surface, client, createTray: () => tray, createNotifier, createAttention: makeAttention().createAttention, focusSession: vi.fn() })
     resolveReady()
     await new Promise(r => setTimeout(r, 0))
 
@@ -372,7 +392,7 @@ describe('main: before-quit disposal', () => {
     const { tray } = makeTray()
     const { createNotifier, dispose: notifierDispose } = makeNotifier()
 
-    main({ appSurface: surface, client, createTray: () => tray, createNotifier, focusSession: vi.fn() })
+    main({ appSurface: surface, client, createTray: () => tray, createNotifier, createAttention: makeAttention().createAttention, focusSession: vi.fn() })
     resolveReady()
     await new Promise(r => setTimeout(r, 0))
 
@@ -389,7 +409,7 @@ describe('main: before-quit disposal', () => {
     const { tray, dispose } = makeTray()
     const { createNotifier, dispose: notifierDispose } = makeNotifier()
 
-    main({ appSurface: surface, client, createTray: () => tray, createNotifier, focusSession: vi.fn() })
+    main({ appSurface: surface, client, createTray: () => tray, createNotifier, createAttention: makeAttention().createAttention, focusSession: vi.fn() })
     await new Promise(r => setTimeout(r, 20))
 
     // No before-quit handler was ever registered by the losing instance, so
@@ -516,7 +536,16 @@ describe('main: attention wiring (Task 7)', () => {
     expect(updates.at(-1)).toEqual([])
   })
 
-  it('the poll keeps feeding the real sessions while the engine is still reachable', async () => {
+  /**
+   * Rewritten after the whole-branch review: the previous version asserted
+   * `updates.at(-1)` still held the session, which is just what `emit()`
+   * pushed — identical if the entire poll body were deleted. It named a
+   * behaviour that does not exist (the poll only acts on a connectivity
+   * FLIP). What is actually worth pinning is the opposite: that a connected
+   * poll does NOT re-enter attention, because `update()` re-reads config.json
+   * and doing that every 5s forever is the cost this design avoids.
+   */
+  it('does NOT re-enter attention on every tick while the engine stays reachable', async () => {
     const { surface, resolveReady } = makeSurface()
     const { client, emit } = makeClient()
     const { tray } = makeTray()
@@ -531,10 +560,13 @@ describe('main: attention wiring (Task 7)', () => {
     await new Promise(r => setTimeout(r, 0))
 
     emit([session({ tier: 'blocked' })])
-    await new Promise(r => setTimeout(r, 20))
+    expect(updates).toHaveLength(1)
 
-    // Still connected, so the poll must NOT clear a genuinely waiting session.
-    expect(updates.at(-1)).toHaveLength(1)
+    await new Promise(r => setTimeout(r, 30)) // several poll ticks
+
+    // Exactly one update — the broadcast's. Every tick calling update() would
+    // mean a synchronous config read on the main thread ~17k times a day.
+    expect(updates).toHaveLength(1)
   })
 
   it('a second instance never builds an attention manager at all', async () => {

@@ -1,9 +1,11 @@
-import { app, shell } from 'electron'
+import { app, shell, Notification } from 'electron'
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { EngineClient } from '@nudge/client'
 import { nudgeHome } from '@nudge/shared/paths'
+import { loadConfig as loadNudgeConfig } from '@nudge/shared/config'
 import type { SessionState } from '@nudge/shared/types'
 import type { ClientMessage } from '@nudge/shared/protocol'
 import { NudgeTray, type TrayCallbacks } from './tray.js'
@@ -28,9 +30,34 @@ import {
 // identifier the other doesn't have.
 declare const __dirname: string | undefined
 const here = typeof __dirname === 'string' ? __dirname : dirname(fileURLToPath(import.meta.url))
-// dist/main.js -> ../../engine/dist/bin.js (mirrors packages/cli/src/bin.ts's
-// identical relative calculation — same directory depth: <pkg>/dist -> <pkg> -> packages -> engine/dist/bin.js).
-const ENGINE_BIN = join(here, '..', '..', 'engine', 'dist', 'bin.js')
+
+/**
+ * Where the engine script lives, which differs between a repo checkout and an
+ * installed app.
+ *
+ * Packaged: `bundle:engine` produces a self-contained ESM bundle which
+ * electron-builder copies to `Contents/Resources/engine/engine.mjs` via
+ * `extraResources` — deliberately OUTSIDE the asar archive, because a child
+ * process cannot read a script from inside one. ESM (not CJS) because the
+ * engine uses top-level `await` and `import.meta`, neither of which esbuild
+ * can emit as CJS; the `engine/` subdirectory makes the engine's own
+ * `join(import.meta.dirname, '..', 'assets')` land on the sounds we ship
+ * alongside it.
+ *
+ * Unpackaged: the sibling workspace build, mirroring packages/cli/src/bin.ts's
+ * identical relative calculation.
+ *
+ * This used to be the repo-relative path unconditionally, which resolved
+ * inside the app bundle to a file that is not shipped. `spawn` still
+ * "succeeded" — the child died with MODULE_NOT_FOUND straight into
+ * `stdio: 'ignore'`, so the `'error'` handler never fired — and the user got
+ * no feedback at all from the one menu item offered when the engine is down.
+ */
+function engineBinPath(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, 'engine', 'engine.mjs')
+    : join(here, '..', '..', 'engine', 'dist', 'bin.js')
+}
 
 /**
  * The subset of `EngineClient`'s public members this module actually uses.
@@ -135,7 +162,19 @@ function defaultAppSurface(): AppSurface {
  * were an Electron app, not a plain script.
  */
 function defaultSpawnEngine(): void {
-  const p = spawn(process.execPath, [ENGINE_BIN], {
+  const bin = engineBinPath()
+  // Checked before spawning, because `spawn` cannot report this failure:
+  // launching `node <missing-file>` succeeds at the OS level and the child
+  // then dies on its own with the error swallowed by `stdio: 'ignore'`. The
+  // `'error'` event only fires when the *executable* cannot be launched.
+  if (!existsSync(bin)) {
+    console.error(
+      `nudge tray: cannot start the engine — no engine script at ${bin}. `
+      + 'Install Nudge from the repo (npm run build) or start it with `nudge start`.',
+    )
+    return
+  }
+  const p = spawn(process.execPath, [bin], {
     detached: true,
     stdio: 'ignore',
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
@@ -218,6 +257,8 @@ export interface MainDeps {
    * Electron-touching default on this interface.
    */
   createAttention?: () => AttentionLike
+  /** Whether this platform/build can actually show a notification; gates the `gui` promise to the engine. */
+  notificationsSupported?: () => boolean
   spawnEngine?: () => void
   openHistoryFolder?: (path: string) => void
   /** Overrides the connectivity poll interval — tests only; production always uses CONNECTIVITY_POLL_MS. */
@@ -269,7 +310,19 @@ export function main(deps: MainDeps = {}): void {
     // the clickable GUI notification the engine defers to — see notify.ts's
     // Notifier class doc for the double-notification problem this closes,
     // and engine.ts's onLocal for the other half of the fix.
-    const client: EngineClientLike = deps.client ?? new EngineClient({ gui: true })
+    // `gui` is a PROMISE TO THE ENGINE that this client will raise a visible,
+    // clickable banner — the engine stands its own banner down on the
+    // strength of it and plays sound only. Claiming it when we cannot deliver
+    // means the user gets a sound and nothing to look at, for every wait,
+    // indefinitely, with no disconnect to make the engine reconsider. So it
+    // is earned, not asserted: if this platform/build cannot show
+    // notifications, stay a plain subscriber and let the engine keep doing
+    // the job.
+    const canNotify = (deps.notificationsSupported ?? (() => Notification.isSupported()))()
+    if (!canNotify) {
+      console.error('nudge tray: notifications are unavailable here — leaving the engine\'s own alerts on')
+    }
+    const client: EngineClientLike = deps.client ?? new EngineClient({ gui: canNotify })
     const spawnEngine = deps.spawnEngine ?? defaultSpawnEngine
     const openHistoryFolder = deps.openHistoryFolder ?? (path => { void shell.openPath(path) })
     const focus = deps.focusSession ?? focusSession
@@ -285,6 +338,17 @@ export function main(deps: MainDeps = {}): void {
       onFocusSession: s => { void focus(s) },
       onStartEngine: () => spawnEngine(),
       onOpenHistoryFolder: () => openHistoryFolder(nudgeHome()),
+      // Read from the config file, which is where `nudge mute` persists it —
+      // the state broadcast carries sessions only, so this is the only way a
+      // client can observe it. Fails toward "not muted" so a broken config
+      // never makes the menu claim alerts are off when they are not.
+      isMuted: () => {
+        try {
+          return loadNudgeConfig().muted
+        } catch {
+          return false
+        }
+      },
       isLaunchAtLogin: () => surface.getLoginItemEnabled(),
       onToggleLaunchAtLogin: on => surface.setLoginItemEnabled(on),
       onQuit: () => surface.quit(),
