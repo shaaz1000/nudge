@@ -9,6 +9,7 @@ import type { ClientMessage } from '@nudge/shared/protocol'
 import { NudgeTray, type TrayCallbacks } from './tray.js'
 import { Notifier } from './notify.js'
 import { focusSession } from './focus.js'
+import { AttentionManager, defaultSurface as defaultAttentionSurface } from './attention.js'
 
 // esbuild's CJS output (used for the real, runnable app — see package.json's
 // `bundle` script) zeroes out `import.meta` entirely ("import.meta is not
@@ -52,6 +53,12 @@ export interface TrayLike {
 /** The subset of Notifier this module needs — lets tests inject a fake notifier without touching Electron's real `Notification` at all. */
 export interface NotifierLike {
   update(sessions: SessionState[]): void
+  dispose(): void
+}
+
+/** The subset of AttentionManager this module needs — lets tests inject a fake without touching the real Dock. */
+export interface AttentionLike {
+  update(sessions: SessionState[], frontmostSessionId?: string | null): void
   dispose(): void
 }
 
@@ -128,6 +135,13 @@ export interface MainDeps {
    * default on this interface.
    */
   focusSession?: (s: SessionState) => Promise<void> | void
+  /**
+   * Task 7's seam: persistent attention (macOS Dock bounce / Windows-Linux
+   * taskbar flash). Defaults to a real `AttentionManager` over the real Dock
+   * — tests must always inject a fake, exactly like every other
+   * Electron-touching default on this interface.
+   */
+  createAttention?: () => AttentionLike
   spawnEngine?: () => void
   openHistoryFolder?: (path: string) => void
   /** Overrides the connectivity poll interval — tests only; production always uses CONNECTIVITY_POLL_MS. */
@@ -228,11 +242,24 @@ export function main(deps: MainDeps = {}): void {
     // than it would be right.
     tray.render([], true)
 
+    // Task 7. Unlike the tray icon (passive) and the notification (banner
+    // that auto-dismisses in seconds), this one does not stop until the wait
+    // actually clears — it is the signal that survives the user looking away,
+    // which is the exact failure this product exists to fix.
+    const attention: AttentionLike = deps.createAttention
+      ? deps.createAttention()
+      : new AttentionManager(defaultAttentionSurface())
+
     let lastSessions: SessionState[] = []
     client.onState(sessions => {
       lastSessions = sessions
       tray.render(sessions, client.connected)
       notifier.update(sessions)
+      // Frontmost is deliberately not passed: the engine tracks it privately
+      // (engine.ts's `#frontmost`) and does not include it in its state
+      // broadcast, so no client can observe it. AttentionManager implements
+      // and tests the rule regardless — see its `update` doc.
+      attention.update(sessions)
       const waiting = sessions.filter(s => s.tier !== null).length
       console.error(`nudge tray: state — ${waiting} waiting, connected=${client.connected}`)
     })
@@ -248,7 +275,9 @@ export function main(deps: MainDeps = {}): void {
 
     client.connect()
 
-    active = [client, tray, notifier, { dispose: () => clearInterval(pollTimer) }]
+    // `attention` disposes with the rest: quitting mid-wait must not leave a
+    // bouncing Dock icon behind (see AttentionManager#dispose).
+    active = [client, tray, notifier, attention, { dispose: () => clearInterval(pollTimer) }]
   })
 
   surface.onBeforeQuit(() => {

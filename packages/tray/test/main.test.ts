@@ -26,7 +26,7 @@ vi.mock('electron', () => ({
 
 import type { SessionState } from '@nudge/shared/types'
 import type { ClientMessage } from '@nudge/shared/protocol'
-import { main, type AppSurface, type EngineClientLike, type TrayLike, type NotifierLike } from '../src/main.js'
+import { main, type AppSurface, type EngineClientLike, type TrayLike, type NotifierLike, type AttentionLike } from '../src/main.js'
 
 const session = (over: Partial<SessionState> = {}): SessionState => ({
   sessionId: 's1', project: 'my-repo', cwd: '/a/my-repo',
@@ -86,6 +86,21 @@ function makeNotifier() {
     return notifier
   })
   return { notifier, updates, dispose, createNotifier, fireOnFocus: (s: SessionState) => capturedOnFocus?.(s) }
+}
+
+/**
+ * A fake AttentionLike (Task 7's Dock-bounce/taskbar-flash module). Injected
+ * for the same reason as every other fake in this file: the real one drives
+ * the actual macOS Dock, and this suite runs on the user's own machine.
+ */
+function makeAttention() {
+  const updates: SessionState[][] = []
+  const dispose = vi.fn()
+  const attention: AttentionLike = {
+    update: sessions => { updates.push(sessions) },
+    dispose,
+  }
+  return { attention, updates, dispose, createAttention: vi.fn(() => attention) }
 }
 
 /** A fully controllable fake AppSurface — every test injects one explicitly. */
@@ -372,5 +387,64 @@ describe('main: before-quit disposal', () => {
     expect(client.dispose).not.toHaveBeenCalled()
     expect(dispose).not.toHaveBeenCalled()
     expect(notifierDispose).not.toHaveBeenCalled()
+  })
+})
+
+describe('main: attention wiring (Task 7)', () => {
+  /**
+   * The wiring, not the bouncing — AttentionManager's own suite covers what
+   * it does with the sessions. This proves main.ts actually hands them over
+   * on every broadcast: without the `attention.update(sessions)` call in
+   * main.ts's onState handler, the Dock never bounces at all, and every one
+   * of attention.test.ts's 41 passing tests would still be green.
+   */
+  it('feeds every state broadcast to the attention manager', async () => {
+    const { surface, resolveReady } = makeSurface()
+    const { client, emit } = makeClient()
+    const { tray } = makeTray()
+    const { createNotifier } = makeNotifier()
+    const { createAttention, updates } = makeAttention()
+
+    main({ appSurface: surface, client, createTray: () => tray, createNotifier, createAttention, focusSession: vi.fn() })
+    resolveReady()
+    await new Promise(r => setTimeout(r, 0))
+
+    const blocked = [session({ tier: 'blocked' })]
+    emit(blocked)
+    emit([])
+
+    expect(updates).toEqual([blocked, []])
+  })
+
+  it('disposes the attention manager on before-quit — quitting mid-wait must not leave the Dock bouncing', async () => {
+    const { surface, resolveReady, fireBeforeQuit } = makeSurface()
+    const { client, emit } = makeClient()
+    const { tray } = makeTray()
+    const { createNotifier } = makeNotifier()
+    const { createAttention, dispose } = makeAttention()
+
+    main({ appSurface: surface, client, createTray: () => tray, createNotifier, createAttention, focusSession: vi.fn() })
+    resolveReady()
+    await new Promise(r => setTimeout(r, 0))
+    emit([session({ tier: 'blocked' })])
+
+    expect(dispose).not.toHaveBeenCalled()
+
+    fireBeforeQuit()
+
+    expect(dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('a second instance never builds an attention manager at all', async () => {
+    const { surface } = makeSurface({ locked: false })
+    const { client } = makeClient()
+    const { tray } = makeTray()
+    const { createNotifier } = makeNotifier()
+    const { createAttention } = makeAttention()
+
+    main({ appSurface: surface, client, createTray: () => tray, createNotifier, createAttention, focusSession: vi.fn() })
+    await new Promise(r => setTimeout(r, 20))
+
+    expect(createAttention).not.toHaveBeenCalled()
   })
 })
