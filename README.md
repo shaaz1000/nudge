@@ -393,6 +393,21 @@ npm run bundle -w nudge-tray # esbuild -> dist/index.cjs, engine, icons
 npm start -w nudge-tray      # run it straight out of the repo
 ```
 
+### Keeping it running
+
+Install it to `/Applications` first (the LaunchAgent points there), then:
+
+```bash
+node packages/tray/scripts/install-launchagent.mjs             # start at login
+node packages/tray/scripts/install-launchagent.mjs --uninstall # stop doing that
+```
+
+Use this rather than the app's own **Start at login** menu item on macOS. That
+item calls `app.setLoginItemSettings`, which registers through LaunchServices —
+and LaunchServices will not launch an ad-hoc-signed bundle: `open -a Nudge`
+exits 0 and starts nothing. launchd does not care, so the agent works where the
+menu item may not. It also sets `KeepAlive`, so the tray comes back if it dies.
+
 To build an installable artefact:
 
 ```bash
