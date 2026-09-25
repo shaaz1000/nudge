@@ -44,6 +44,35 @@ you get back from the kitchen.
 
 ---
 
+## What it looks like
+
+<img src="docs/signals.svg" alt="Where each Nudge signal appears: a badged menu-bar icon, a notification banner, a Dock icon that bounces until answered, and a phone push after three minutes." width="920">
+
+And from the terminal — this is real output, with paths and project names
+genericised:
+
+```console
+$ nudge status
+config    /Users/you/.nudge/config.json
+socket    /Users/you/.nudge/engine.sock
+detail    minimal
+muted     false
+channel   ntfy
+adapters  ntfy
+engine    running
+
+$ nudge list
+blocked     acme-api                       3s  Allow npm install?
+idle-short  docs-site                  12m 04s
+stalled     old-experiment             24m 14s
+```
+
+`blocked` is a prompt waiting on you — that one bounces the Dock and escalates
+to your phone. `idle-short` is a turn that finished. `stalled` is a session
+that has gone quiet for 15 minutes.
+
+---
+
 ## What you get
 
 | | |
