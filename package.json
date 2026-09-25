@@ -19,7 +19,7 @@
     "vitest": "^2.1.0",
     "@types/node": "^22.7.0"
   },
-  "description": "Tells you when Claude Code is waiting on you \u2014 desktop alert, bouncing Dock icon, then your phone if you don't come back.",
+  "description": "Get notified when Claude Code is waiting on you. Desktop notifications, a bouncing Dock icon and phone alerts when your AI coding agent is blocked on a permission prompt or finishes a task.",
   "license": "MIT",
   "author": "Shaaz Khan <Shaazkhan153@gmail.com>",
   "repository": {
@@ -32,11 +32,28 @@
   "homepage": "https://github.com/shaaz1000/nudge#readme",
   "keywords": [
     "claude-code",
+    "claude",
+    "anthropic",
+    "ai-agent",
+    "coding-agent",
+    "agent-notifications",
     "notifications",
+    "desktop-notifications",
+    "push-notifications",
     "ntfy",
+    "alerts",
     "developer-tools",
-    "electron",
+    "productivity",
     "cli",
-    "productivity"
+    "daemon",
+    "electron",
+    "menubar",
+    "tray",
+    "vscode-extension",
+    "cursor",
+    "windsurf",
+    "macos",
+    "typescript",
+    "hooks"
   ]
 }

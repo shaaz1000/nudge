@@ -1,12 +1,18 @@
-# Nudge
+# Nudge: get notified when Claude Code is waiting on you
 
-**Claude Code stops and waits for you. Nudge tells you.**
+**Desktop notifications, a bouncing Dock icon, and phone alerts for Claude
+Code.** Nudge tells you the moment your AI coding agent is blocked on a
+permission prompt, is asking a question, or has finished a task, so you stop
+losing time to a terminal window you cannot see.
+
+Works with **Claude Code** in the terminal, in **VS Code**, in **Cursor**, and
+in **Windsurf**, plus the Claude desktop app.
 
 You ask an agent to do something, switch to your browser, and come back ten
-minutes later to find it never moved — it was sitting on a permission prompt
-the whole time. Nudge closes that gap: a desktop alert the moment a session
-blocks, a Dock icon that keeps bouncing until you deal with it, and a push to
-your phone if you've walked away entirely.
+minutes later to find it never moved. It was sitting on "Allow npm install?"
+the whole time. Nudge closes that gap: a desktop notification the instant a
+session blocks, a Dock icon that keeps bouncing until you deal with it, and a
+push to your phone if you have walked away entirely.
 
 [![CI](https://github.com/shaaz1000/nudge/actions/workflows/ci.yml/badge.svg)](https://github.com/shaaz1000/nudge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -310,6 +316,72 @@ a window with no taskbar button is a silent no-op, and no automated check can
 see the difference. If you run either platform, [telling us whether it actually
 flashes](https://github.com/shaaz1000/nudge/issues) is genuinely the single
 most useful contribution right now.
+
+---
+
+## FAQ
+
+**How do I get notified when Claude Code finishes a task?**
+Install Nudge and run `nudge setup`. When a turn finishes you get a desktop
+notification, and if the turn ran longer than three minutes you also get a
+sound and a bouncing Dock icon. You can turn the bounce on for every finished
+turn with `tray.bounceTiers` in the config.
+
+**How do I know when Claude Code is waiting for permission?**
+That is the main thing Nudge is for. The moment a session blocks on a
+permission prompt or a question, you get a notification, a sound, and a Dock
+icon that keeps bouncing until you answer it.
+
+**Can I get Claude Code notifications on my phone?**
+Yes, through [ntfy](https://ntfy.sh). You create your own topic, subscribe on
+your phone, and Nudge pushes to it if you have not responded within a few
+minutes. There is no account and no server of ours in the middle. You can also
+self host ntfy if you would rather nothing touched a public server.
+
+**Does it work with Cursor, Windsurf, or the Claude desktop app?**
+Yes. Nudge detects which surface a session is running in, and clicking the
+notification brings that window forward. Supported: VS Code, Cursor, Windsurf,
+the Claude desktop app, Terminal.app, iTerm2, and Windows Terminal.
+
+**Does Nudge send my code or my prompts anywhere?**
+No. Everything runs locally over a `0600` unix socket. There is no telemetry,
+no analytics, and no update check. The only thing that ever leaves your machine
+is the phone push, and by default that carries just a project name and a status,
+never the question text or the command. Setting `detailLevel` to `"full"` is
+what changes that, and it is off by default for this reason.
+
+**Does it work on Windows and Linux?**
+The core does: hooks, desktop notifications, phone push, and click to focus all
+work on all three platforms. The taskbar flash on Windows and Linux is written
+and runs in CI, but no human has confirmed it visibly flashes yet. macOS is the
+platform verified end to end.
+
+**Will it slow down Claude Code?**
+No. The hook process forwards one event and exits, with a hard budget of 500ms,
+and it always exits 0 so it can never fail your session. If the daemon is not
+running, events spool to disk and replay later.
+
+**Is it free?**
+Yes, MIT licensed and open source. No account, no paid tier, no hosted service.
+
+**Why not just watch the terminal?**
+Because you will not. The whole failure mode is that you tabbed away, and a
+notification banner disappears after a few seconds. A Dock icon that is still
+bouncing when you come back from the kitchen is the part that actually changes
+the outcome.
+
+**How does it hook into Claude Code?**
+Through Claude Code's own hooks system. `nudge setup` adds seven hook entries
+to your settings, marked so it can remove exactly its own entries later, and
+takes a backup first. Worth knowing: multiple choice questions do not fire
+Claude Code's `Notification` hook
+([claude-code#59908](https://github.com/anthropics/claude-code/issues/59908)),
+so Nudge catches those through `PreToolUse` instead.
+
+**Is there something like this for other agents?**
+Not yet. The event ingestion is Claude Code specific today, but the daemon,
+the alert tiers and the channels are agent agnostic, so adding another source
+is a contained piece of work. Contributions welcome.
 
 ---
 
