@@ -18,5 +18,25 @@
     "typescript": "^5.6.0",
     "vitest": "^2.1.0",
     "@types/node": "^22.7.0"
-  }
+  },
+  "description": "Tells you when Claude Code is waiting on you \u2014 desktop alert, bouncing Dock icon, then your phone if you don't come back.",
+  "license": "MIT",
+  "author": "Shaaz Khan <Shaazkhan153@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shaaz1000/nudge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/shaaz1000/nudge/issues"
+  },
+  "homepage": "https://github.com/shaaz1000/nudge#readme",
+  "keywords": [
+    "claude-code",
+    "notifications",
+    "ntfy",
+    "developer-tools",
+    "electron",
+    "cli",
+    "productivity"
+  ]
 }

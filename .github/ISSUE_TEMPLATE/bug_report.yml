@@ -1,0 +1,49 @@
+name: Bug report
+description: Something isn't working
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. The most useful thing you can tell us is **which
+        signals arrived and which didn't** — they come from different
+        components, so that usually points straight at the cause.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: And what did you expect instead?
+    validations: { required: true }
+  - type: checkboxes
+    id: signals
+    attributes:
+      label: Which signals did you get?
+      description: Tick everything that actually happened.
+      options:
+        - label: Desktop notification banner
+        - label: Sound
+        - label: Dock icon bounced (macOS) / taskbar flashed (Windows, Linux)
+        - label: Menu-bar or status-bar icon changed
+        - label: Phone push
+        - label: Nothing at all
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+      placeholder: "macOS 15.2 / Ubuntu 24.04 / Windows 11"
+    validations: { required: true }
+  - type: input
+    id: node
+    attributes:
+      label: node --version
+      placeholder: "v24.1.0"
+    validations: { required: true }
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `nudge status`
+      render: shell
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce

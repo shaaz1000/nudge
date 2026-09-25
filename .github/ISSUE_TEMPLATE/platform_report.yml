@@ -1,0 +1,38 @@
+name: Windows / Linux verification
+description: Tell us whether the taskbar flash actually works
+labels: ["platform-verification", "good first issue"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is genuinely the most useful report we can receive right now.
+
+        The taskbar flash is implemented and CI exercises it on real Windows
+        and Linux runners — but **nobody has watched a taskbar actually
+        flash**. `flashFrame` against a window with no taskbar button is a
+        silent no-op, so no automated check can tell the difference. Only a
+        human looking at a screen can.
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+    validations: { required: true }
+  - type: input
+    id: de
+    attributes:
+      label: Desktop environment (Linux only)
+      placeholder: "GNOME 46 / KDE Plasma 6 / Sway"
+  - type: dropdown
+    id: result
+    attributes:
+      label: Did the taskbar button actually flash or highlight?
+      options:
+        - "Yes — clearly visible"
+        - "Something happened, but it was subtle or odd"
+        - "No — nothing visible at all"
+    validations: { required: true }
+  - type: textarea
+    id: detail
+    attributes:
+      label: What did you see?
+      description: Screenshot or short video very welcome.
