@@ -395,7 +395,7 @@ describe('focusSession: executes the plan via injected surfaces', () => {
     const { clipboard, written } = makeClipboard()
     const notify = vi.fn()
 
-    await focusSession(session({ kind: 'vscode' }, { cwd: '/x/proj' }), { spawner, clipboard, notify, platform: 'darwin' })
+    await focusSession(session({ kind: 'vscode' }, { cwd: '/x/proj' }), { spawner, clipboard, notify, platform: 'darwin', commandExists: () => true })
 
     expect(calls).toEqual([{ cmd: 'code', args: ['/x/proj'] }])
     expect(written).toHaveLength(0)
@@ -407,7 +407,7 @@ describe('focusSession: executes the plan via injected surfaces', () => {
     const { clipboard, written } = makeClipboard()
     const notify = vi.fn()
 
-    await focusSession(session({ kind: 'unknown' }, { cwd: '/x/proj', project: 'repo-x' }), { spawner, clipboard, notify, platform: 'darwin' })
+    await focusSession(session({ kind: 'unknown' }, { cwd: '/x/proj', project: 'repo-x' }), { spawner, clipboard, notify, platform: 'darwin', commandExists: () => true })
 
     expect(calls).toHaveLength(0)
     expect(written).toEqual(['/x/proj'])
@@ -474,10 +474,10 @@ describe('focusSession: never resolves the wait', () => {
     // every surface below, is the runtime half of the proof (the compile-time
     // half is the `@ts-expect-error` test above). Also checks that nothing
     // spawned or written even incidentally resembles a resolve/ack payload.
-    await focusSession(session({ kind: 'vscode' }), { spawner, clipboard, notify: vi.fn(), platform: 'darwin' })
-    await focusSession(session({ kind: 'desktop', app: { name: 'Claude' } }), { spawner, clipboard, notify: vi.fn(), platform: 'darwin' })
-    await focusSession(session({ kind: 'terminal', tty: '2' }), { spawner, clipboard, notify: vi.fn(), platform: 'darwin' })
-    await focusSession(session({ kind: 'unknown' }), { spawner, clipboard, notify: vi.fn(), platform: 'darwin' })
+    await focusSession(session({ kind: 'vscode' }), { spawner, clipboard, notify: vi.fn(), platform: 'darwin', commandExists: () => true })
+    await focusSession(session({ kind: 'desktop', app: { name: 'Claude' } }), { spawner, clipboard, notify: vi.fn(), platform: 'darwin', commandExists: () => true })
+    await focusSession(session({ kind: 'terminal', tty: '2' }), { spawner, clipboard, notify: vi.fn(), platform: 'darwin', commandExists: () => true })
+    await focusSession(session({ kind: 'unknown' }), { spawner, clipboard, notify: vi.fn(), platform: 'darwin', commandExists: () => true })
     for (const call of calls) expect(JSON.stringify(call)).not.toContain('resolve')
     for (const text of written) expect(text).not.toContain('resolve')
   })
