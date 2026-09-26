@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { homedir, userInfo } from 'node:os'
 import { join } from 'node:path'
-import { nudgeHome, socketPath, configPath, spoolDir, dbPath, lockPath } from '../src/paths.js'
+import { nudgeHome, socketPath, configPath, spoolDir, dbPath, lockPath, socketAddress } from '../src/paths.js'
 
 describe('paths', () => {
   const original = process.env.NUDGE_HOME
@@ -74,5 +74,38 @@ describe('socketPath on an injected win32 platform', () => {
   it('falls back to the per-user default when NUDGE_HOME is unset', () => {
     delete process.env.NUDGE_HOME
     expect(socketPath('win32')).toBe(`\\\\.\\pipe\\nudge-${userInfo().username}`)
+  })
+})
+
+describe('socketAddress: a socket address is not a file path on Windows', () => {
+  it('is a file inside the directory on posix', () => {
+    expect(socketAddress('/tmp/x', 'engine.sock', 'darwin')).toBe('/tmp/x/engine.sock')
+    expect(socketAddress('/tmp/x', 'engine.sock', 'linux')).toBe('/tmp/x/engine.sock')
+  })
+
+  it('is a named pipe on win32, never a path', () => {
+    // Thirteen test files failed on Windows with EACCES because they built
+    // join(tmpdir, 'engine.sock') and called listen() on it. Windows cannot
+    // listen on a filesystem path; `\\.\pipe\<name>` is the only valid form.
+    const a = socketAddress('C:\\Temp\\x', 'engine.sock', 'win32')
+    expect(a.startsWith('\\\\.\\pipe\\')).toBe(true)
+    expect(a).not.toContain('engine.sock')
+  })
+
+  it('gives different pipes to different names in the same directory', () => {
+    const one = socketAddress('C:\\Temp\\x', 'a.sock', 'win32')
+    const two = socketAddress('C:\\Temp\\x', 'b.sock', 'win32')
+    expect(one).not.toBe(two)
+  })
+
+  it('gives different pipes to the same name in different directories', () => {
+    const one = socketAddress('C:\\Temp\\one', 'engine.sock', 'win32')
+    const two = socketAddress('C:\\Temp\\two', 'engine.sock', 'win32')
+    expect(one).not.toBe(two)
+  })
+
+  it('is stable for the same inputs', () => {
+    expect(socketAddress('C:\\Temp\\x', 'e.sock', 'win32'))
+      .toBe(socketAddress('C:\\Temp\\x', 'e.sock', 'win32'))
   })
 })

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { socketAddress } from '@nudge/shared/paths'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -302,7 +303,7 @@ describe('engine defers to a connected GUI client (Finding 5)', () => {
   let sockPath: string
   let realServer: EngineServer
 
-  beforeEach(() => { sockPath = join(dir, 'gui.sock') })
+  beforeEach(() => { sockPath = socketAddress(dir, 'gui.sock') })
   afterEach(async () => { await realServer?.close() })
 
   function buildWithRealServer() {
@@ -713,7 +714,7 @@ describe('malformed optional fields never reach the store (I10)', () => {
         source: 'claude-code', sessionId: 's1', hook: 'Notification',
         cwd: '/a/my-repo', project: 'my-repo', ts: clock.now(), message: { evil: true },
       }
-      await sendOverSocket(server, join(dir, 'i10-bad.sock'), badEvent)
+      await sendOverSocket(server, socketAddress(dir, 'i10-bad.sock'), badEvent)
 
       // The sharp checks: not "handle() didn't throw", but that nothing it
       // would have done before throwing actually happened.
@@ -733,7 +734,7 @@ describe('malformed optional fields never reach the store (I10)', () => {
         source: 'claude-code', sessionId: 's1', hook: 'Notification',
         cwd: '/a/my-repo', project: 'my-repo', ts: clock.now(), message: 'Allow?',
       }
-      await sendOverSocket(server, join(dir, 'i10-good.sock'), goodEvent)
+      await sendOverSocket(server, socketAddress(dir, 'i10-good.sock'), goodEvent)
 
       expect(store.get('s1')).toBeDefined()
       expect(store.list()).toHaveLength(1)

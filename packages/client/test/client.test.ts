@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { socketAddress } from '@nudge/shared/paths'
 import { createServer, type Server, type Socket } from 'node:net'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -80,7 +81,7 @@ function makeClient(opts: { path?: string; initialBackoffMs?: number; maxBackoff
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'nudge-vscx-'))
-  sockPath = join(dir, 'engine.sock')
+  sockPath = socketAddress(dir, 'engine.sock')
 })
 
 afterEach(async () => {
@@ -198,7 +199,7 @@ describe('EngineClient', () => {
   // connecting would still be sitting on that grown value the next time the
   // engine drops — so the very next retry would be slow, not prompt.
   it('resets backoff to the initial delay after a successful connect, not just via dispose (I4)', async () => {
-    const path = join(dir, 'flaky.sock')
+    const path = socketAddress(dir, 'flaky.sock')
     const client = makeClient({ path, initialBackoffMs: 20, maxBackoffMs: 500 })
     client.connect()
 
@@ -304,7 +305,7 @@ describe('EngineClient', () => {
   })
 
   it('reports disconnected rather than throwing when no engine is listening', async () => {
-    const client = makeClient({ path: join(dir, 'absent.sock') })
+    const client = makeClient({ path: socketAddress(dir, 'absent.sock') })
     expect(() => client.connect()).not.toThrow()
     await new Promise(r => setTimeout(r, 100))
     expect(client.connected).toBe(false)
@@ -335,7 +336,7 @@ describe('EngineClient', () => {
   })
 
   it('dispose cancels a pending reconnect timer instead of leaking a connection per reload', async () => {
-    const path = join(dir, 'appears-later.sock')
+    const path = socketAddress(dir, 'appears-later.sock')
     // Nothing is listening yet: connect() fails fast and schedules a retry.
     const client = makeClient({ path, initialBackoffMs: 20, maxBackoffMs: 20 })
     client.connect()
@@ -360,7 +361,7 @@ describe('EngineClient', () => {
   // stops calling it, regardless of what connect()'s guard would do.
   it('dispose() calls clearTimeout on the pending reconnect timer', async () => {
     const clearSpy = vi.spyOn(global, 'clearTimeout')
-    const path = join(dir, 'never-appears.sock')
+    const path = socketAddress(dir, 'never-appears.sock')
     const client = makeClient({ path, initialBackoffMs: 5_000, maxBackoffMs: 5_000 })
     client.connect()
     await new Promise(r => setTimeout(r, 30))

@@ -37,6 +37,36 @@ export function lockPath(): string { return join(nudgeHome(), 'engine.lock') }
  * `platform` defaults to `process.platform` and exists so tests can exercise
  * the win32 branch on any host without actually running on Windows.
  */
+/**
+ * The listen/connect address for an arbitrary socket, derived from a directory
+ * and a name.
+ *
+ * This exists because a socket address is NOT a file path on Windows. POSIX
+ * uses a unix-domain socket, which really is a file inside a directory;
+ * Windows uses a named pipe, where `\\.\pipe\<name>` is the only valid form
+ * and `listen()` on a filesystem path fails with EACCES.
+ *
+ * `socketPath()` below handles the one real engine socket. This handles every
+ * other case, which in practice means tests that need several independent
+ * sockets: they used to build `join(tmpdir, 'engine.sock')` by hand, which is
+ * correct on macOS and Linux and unusable on Windows, so thirteen test files
+ * failed there for a reason that had nothing to do with the code under test.
+ *
+ * The name is hashed together with the directory so two tests using the same
+ * name in different temp directories still get distinct pipes.
+ */
+export function socketAddress(
+  dir: string,
+  name: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (platform === 'win32') {
+    const hash = createHash('sha1').update(`${resolve(dir)}\0${name}`).digest('hex').slice(0, 16)
+    return `\\\\.\\pipe\\nudge-${hash}`
+  }
+  return join(dir, name)
+}
+
 export function socketPath(platform: NodeJS.Platform = process.platform): string {
   if (platform === 'win32') {
     const home = process.env.NUDGE_HOME

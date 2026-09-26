@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { socketAddress } from '@nudge/shared/paths'
 import { createServer, type Server } from 'node:net'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -17,7 +18,7 @@ let server: Server | null = null
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'nudge-start-'))
-  sock = join(dir, 'e.sock')
+  sock = socketAddress(dir, 'e.sock')
 })
 afterEach(async () => {
   if (server) await new Promise<void>(r => server!.close(() => r()))
@@ -46,7 +47,7 @@ describe('cmdStart single-instance guard', () => {
 
   it('proceeds to spawn when nothing answers (no socket file / stale socket)', async () => {
     const spawnEngine = vi.fn()
-    await cmdStart(spawnEngine, join(dir, 'absent.sock'))
+    await cmdStart(spawnEngine, socketAddress(dir, 'absent.sock'))
 
     expect(spawnEngine).toHaveBeenCalledTimes(1)
   })

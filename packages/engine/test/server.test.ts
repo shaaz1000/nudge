@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { socketAddress } from '@nudge/shared/paths'
 import { connect, type Socket } from 'node:net'
 import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -43,7 +44,7 @@ function client(path: string = sock): Promise<{ s: Socket; next: () => Promise<u
 
 beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'nudge-srv-'))
-  sock = join(dir, 'engine.sock')
+  sock = socketAddress(dir, 'engine.sock')
   received = []
   server = new EngineServer({
     onEvent: ev => { received.push(ev) },
@@ -219,7 +220,7 @@ describe('EngineServer', () => {
         onList: () => [session()],
         onSnooze: vi.fn(), onMute: vi.fn(), onResolve: vi.fn(), onIdle: vi.fn(), onFrontmost: vi.fn(),
       })
-      const throwingSock = join(dir, 'throwing.sock')
+      const throwingSock = socketAddress(dir, 'throwing.sock')
       await throwingServer.listen(throwingSock)
       try {
         const s = connect(throwingSock)
@@ -333,7 +334,7 @@ describe('EngineServer', () => {
 
     it('fires onGuiDisconnected the instant the LAST GUI subscriber disconnects', async () => {
       const { s: guiSock, onGuiDisconnected } = guiServer()
-      const p = join(dir, 'gui1.sock')
+      const p = socketAddress(dir, 'gui1.sock')
       await guiSock.listen(p)
       try {
         const a = await client(p)
@@ -351,7 +352,7 @@ describe('EngineServer', () => {
 
     it('does NOT fire onGuiDisconnected while at least one other GUI subscriber remains', async () => {
       const { s: guiSock, onGuiDisconnected } = guiServer()
-      const p = join(dir, 'gui2.sock')
+      const p = socketAddress(dir, 'gui2.sock')
       await guiSock.listen(p)
       try {
         const a = await client(p)
@@ -375,7 +376,7 @@ describe('EngineServer', () => {
 
     it('does NOT fire onGuiDisconnected when a non-GUI subscriber disconnects', async () => {
       const { s: guiSock, onGuiDisconnected } = guiServer()
-      const p = join(dir, 'gui3.sock')
+      const p = socketAddress(dir, 'gui3.sock')
       await guiSock.listen(p)
       try {
         const a = await client(p)
@@ -392,7 +393,7 @@ describe('EngineServer', () => {
 
     it('fires onGuiDisconnected only once for a socket that both errors and closes', async () => {
       const { s: guiSock, onGuiDisconnected } = guiServer()
-      const p = join(dir, 'gui4.sock')
+      const p = socketAddress(dir, 'gui4.sock')
       await guiSock.listen(p)
       try {
         const a = await client(p)
@@ -414,7 +415,7 @@ describe('EngineServer', () => {
 
     it('a graceful close() never fires onGuiDisconnected — nothing useful to fall back to while the engine itself is shutting down', async () => {
       const { s: guiSock, onGuiDisconnected } = guiServer()
-      const p = join(dir, 'gui5.sock')
+      const p = socketAddress(dir, 'gui5.sock')
       await guiSock.listen(p)
       const a = await client(p)
       a.s.on('error', () => { /* expected: server-initiated teardown */ })
@@ -443,7 +444,7 @@ describe('EngineServer', () => {
         onResolve: vi.fn(), onIdle: vi.fn(), onFrontmost: vi.fn(),
         // onGuiDisconnected deliberately omitted.
       })
-      const p = join(dir, 'gui6.sock')
+      const p = socketAddress(dir, 'gui6.sock')
       await noHandler.listen(p)
       try {
         const a = await client(p)

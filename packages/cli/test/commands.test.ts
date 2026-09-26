@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { socketAddress } from '@nudge/shared/paths'
 import { createServer, type Server } from 'node:net'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -12,7 +13,7 @@ let server: Server | null = null
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'nudge-cmd-'))
-  sock = join(dir, 'e.sock')
+  sock = socketAddress(dir, 'e.sock')
 })
 afterEach(async () => {
   if (server) await new Promise<void>(r => server!.close(() => r()))
@@ -37,7 +38,7 @@ describe('request', () => {
   })
 
   it('rejects with a clear message when the engine is not running', async () => {
-    await expect(request({ t: 'ping', id: 1 }, join(dir, 'absent.sock')))
+    await expect(request({ t: 'ping', id: 1 }, socketAddress(dir, 'absent.sock')))
       .rejects.toThrow(/not running/i)
   })
 

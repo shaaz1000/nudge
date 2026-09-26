@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest'
+import { socketAddress } from '@nudge/shared/paths'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -78,7 +79,7 @@ afterEach(async () => {
 describe('engine single-instance guard (C2)', () => {
   it('the second engine started against the same NUDGE_HOME exits without binding, leaving the first alive and reachable', async () => {
     home = mkdtempSync(join(tmpdir(), 'nudge-single-'))
-    const sock = join(home, 'engine.sock')
+    const sock = socketAddress(home, 'engine.sock')
 
     const a = spawnEngine()
     await waitForSocket(sock, 5000)
@@ -100,7 +101,7 @@ describe('engine single-instance guard (C2)', () => {
 
   it('a stale lock (holder pid not alive) is reclaimed, so a crashed engine does not permanently block future starts', async () => {
     home = mkdtempSync(join(tmpdir(), 'nudge-single-stale-'))
-    const sock = join(home, 'engine.sock')
+    const sock = socketAddress(home, 'engine.sock')
     const lockFile = join(home, 'engine.lock')
 
     // Simulate a crash: a lock file left behind by a pid that is provably

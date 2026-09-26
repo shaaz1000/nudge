@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { socketAddress } from '@nudge/shared/paths'
 import { createServer, type Server } from 'node:net'
 import { mkdtempSync, rmSync, readdirSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -18,7 +19,7 @@ afterEach(async () => {
 
 describe('sendEvent', () => {
   it('delivers the payload to a listening engine', async () => {
-    const sock = join(dir, 'e.sock')
+    const sock = socketAddress(dir, 'e.sock')
     const got: string[] = []
     server = createServer(s => { s.setEncoding('utf8'); s.on('data', d => got.push(d as unknown as string)) })
     await new Promise<void>(r => server!.listen(sock, () => r()))
@@ -30,13 +31,13 @@ describe('sendEvent', () => {
   })
 
   it('returns false rather than throwing when nothing is listening', async () => {
-    const ok = await sendEvent('{"t":"event"}\n', 300, join(dir, 'absent.sock'))
+    const ok = await sendEvent('{"t":"event"}\n', 300, socketAddress(dir, 'absent.sock'))
     expect(ok).toBe(false)
   })
 
   it('gives up within the deadline when the peer never accepts', async () => {
     const started = Date.now()
-    await sendEvent('{}\n', 200, join(dir, 'absent.sock'))
+    await sendEvent('{}\n', 200, socketAddress(dir, 'absent.sock'))
     expect(Date.now() - started).toBeLessThan(1500)
   })
 })
